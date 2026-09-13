@@ -144,43 +144,65 @@ fn gtnh_grass_and_foliage_are_green() {
     eprintln!("best GTNH tile: {:.1}% green at {:?}", best_green, best_tile);
 }
 
-/// `is_foliage` must cover the blocks that actually appear on the surface.
+/// `is_foliage` must match the vanilla tint categories exactly: blocks that
+/// the game tints with the biome colour, and nothing else. Tinting a flower
+/// or a crop turns it green, which is wrong.
 #[test]
-fn foliage_classification_covers_real_surface_blocks() {
-    // Blocks observed as the top layer in the real GTNH save.
+fn foliage_classification_matches_vanilla_tint_categories() {
+    // Vanilla `grass` tint: grass_block top, short/tall grass, ferns, reeds.
+    // Vanilla `foliage` tint: leaves and vines.
+    // Plus modded ground cover observed on the real GTNH surface.
     let must_tint = [
         "minecraft:grass",
         "minecraft:grass_block",
         "minecraft:tallgrass",
+        "minecraft:short_grass",
+        "minecraft:tall_grass",
+        "minecraft:fern",
+        "minecraft:large_fern",
+        "minecraft:reeds",
+        "minecraft:double_plant",
         "minecraft:leaves",
         "minecraft:leaves2",
-        "BiomesOPlenty:foliage",
-        "minecraft:double_plant",
         "minecraft:vine",
-        "minecraft:waterlily",
-        "minecraft:red_flower",
-        "minecraft:yellow_flower",
+        "minecraft:oak_leaves",
+        "minecraft:spruce_leaves",
+        "minecraft:acacia_leaves",
+        "BiomesOPlenty:foliage",
+        "Thaumcraft:blockMagicalLeaves",
+        "IC2:blockRubLeaves",
     ];
+    // These have their own colours and must NOT be tinted green.
     let must_not_tint = [
         "minecraft:stone",
         "minecraft:dirt",
         "minecraft:water",
         "minecraft:sand",
         "minecraft:gravel",
-        "gregtech:gt.blockores",
         "minecraft:log",
+        "gregtech:gt.blockores",
+        "minecraft:red_flower",
+        "minecraft:yellow_flower",
+        "minecraft:wheat",
+        "minecraft:carrots",
+        "minecraft:brown_mushroom",
+        "minecraft:red_mushroom",
+        "minecraft:cactus",
+        "minecraft:waterlily",
+        "BiomesOPlenty:flowers",
+        "BiomesOPlenty:lilyBop",
     ];
     for name in must_tint {
         assert!(
             testing::is_foliage(name),
-            "{} must be treated as foliage",
+            "{} must be tinted (vanilla tint category)",
             name
         );
     }
     for name in must_not_tint {
         assert!(
             !testing::is_foliage(name),
-            "{} must NOT be treated as foliage",
+            "{} must NOT be tinted — it has its own colour",
             name
         );
     }

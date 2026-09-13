@@ -81,34 +81,58 @@ pub fn load_chunk(region_dir: &Path, cx: i32, cz: i32) -> Result<Option<ChunkDat
     }
 }
 
-/// Blocks whose texture is grey and must be multiplied by a biome colour.
+/// Blocks whose texture is grey in the palette and must be multiplied by a
+/// biome colour before rendering.
 ///
 /// The JourneyMap palette stores the *untinted* texture colour for these, so
 /// without this they render as flat grey — which is what made grass and
 /// tall grass look black-and-white while stone and dirt looked fine.
+///
+/// Membership follows the vanilla tint categories (`grass` and `foliage`);
+/// see the block tinting tables on wiki.bedrock.dev/blocks/block-tinting.
+/// Flowers, crops and mushrooms are deliberately excluded — they have their
+/// own colours and must not be tinted green.
 pub fn is_foliage(name: &str) -> bool {
     let base = name.split('[').next().unwrap_or(name);
     // Strip any namespace, not just "minecraft:" — modded ids like
     // "BiomesOPlenty:foliage" must classify the same way.
     let short = base.split(':').next_back().unwrap_or(base);
     let lower = short.to_ascii_lowercase();
-    matches!(
+
+    // --- vanilla `grass` tint category ---
+    if matches!(
         lower.as_str(),
-        "grass" | "grass_block" | "leaves" | "leaves2" | "tallgrass" | "vine"
-            | "waterlily" | "double_plant" | "yellow_flower" | "red_flower"
-            | "sapling" | "grass_path" | "foliage" | "bush" | "shrub"
-            | "plant" | "flower" | "crop" | "stem" | "mushroom" | "lilybop"
-    ) || lower.ends_with("_leaves")
-        || lower.ends_with("leaves")
-        || lower.ends_with("_sapling")
-        || lower.ends_with("_vine")
-        || lower.ends_with("_foliage")
-        || lower.ends_with("_plant")
-        || lower.ends_with("_flower")
-        || lower.ends_with("_grass")
-        || lower.contains("tallgrass")
-        || lower.contains("foliage")
-        || lower.contains("lily")
+        "grass" | "grass_block" | "tallgrass" | "short_grass" | "tall_grass"
+            | "fern" | "large_fern" | "reeds" | "sugar_cane" | "double_plant"
+            | "grass_path" | "wildflowers"
+    ) {
+        return true;
+    }
+
+    // --- vanilla `foliage` tint category ---
+    if lower == "leaves" || lower == "leaves2" || lower == "vine" || lower == "vines" {
+        return true;
+    }
+    if lower.ends_with("_leaves") || lower.ends_with("leaves") {
+        return true;
+    }
+    if lower.ends_with("_vine") || lower.ends_with("_vines") {
+        return true;
+    }
+
+    // --- modded ground cover that behaves like grass/foliage ---
+    // BiomesOPlenty:foliage, Botania grass, Thaumcraft magical leaves, etc.
+    if matches!(lower.as_str(), "foliage" | "bush" | "shrub") {
+        return true;
+    }
+    if lower.ends_with("_foliage") || lower.contains("tallgrass") {
+        return true;
+    }
+    if lower.ends_with("_grass") && !lower.contains("nether") && !lower.contains("warped") {
+        return true;
+    }
+
+    false
 }
 
 /// Multiply an untinted (grey) texture colour by a temperate biome green.

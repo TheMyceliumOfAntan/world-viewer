@@ -136,10 +136,11 @@ impl Palette {
 
     /// Look up a colour for a block reference.
     ///
-    /// Resolution order:
-    ///   1. JourneyMap palette, by block name (+ meta when legacy)
-    ///   2. built-in vanilla table, by block name
-    ///   3. fallback grey
+    /// Returns `(rgb, source, block_name)`. `block_name` is always the
+    /// canonical block id (e.g. `minecraft:grass`), never the JourneyMap
+    /// display name — the renderer classifies blocks with it to decide
+    /// whether to apply a biome tint. Returning a display name here silently
+    /// disables tinting for grass and leaves.
     pub fn color_ref(&self, b: &crate::render::BlockRef) -> ([u8; 3], &'static str, String) {
         let (name, meta) = match b {
             crate::render::BlockRef::Legacy(id, meta) => {
@@ -153,14 +154,14 @@ impl Palette {
         };
 
         if let Some(metas) = self.by_uid.get(name.as_str()) {
-            if let Some((rgb, disp)) = metas.get(&meta) {
-                return (*rgb, "exact", disp.clone());
+            if let Some((rgb, _disp)) = metas.get(&meta) {
+                return (*rgb, "exact", name);
             }
-            if let Some((rgb, disp)) = metas.get(&0) {
-                return (*rgb, "meta0", disp.clone());
+            if let Some((rgb, _disp)) = metas.get(&0) {
+                return (*rgb, "meta0", name);
             }
-            if let Some((rgb, disp)) = metas.values().next() {
-                return (*rgb, "first", disp.clone());
+            if let Some((rgb, _disp)) = metas.values().next() {
+                return (*rgb, "first", name);
             }
         }
 
@@ -169,6 +170,20 @@ impl Palette {
         }
 
         (self.fallback, "unknown", name)
+    }
+
+    /// Human-readable name for a block, for tooltips and popups.
+    /// Prefers the JourneyMap display name, falling back to the block id.
+    pub fn display_name(&self, b: &crate::render::BlockRef) -> String {
+        let id_name = match b {
+            crate::render::BlockRef::Legacy(id, _) => self.name_of(*id),
+            crate::render::BlockRef::Named(n) => n.clone(),
+        };
+        self.by_uid
+            .get(id_name.as_str())
+            .and_then(|m| m.get(&0))
+            .map(|(_, disp)| disp.clone())
+            .unwrap_or(id_name)
     }
 
     /// Look up color by block id + meta. Returns (rgb, source, name).
