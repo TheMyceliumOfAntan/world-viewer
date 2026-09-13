@@ -112,30 +112,35 @@ pub fn run() {
             pick_save_folder
         ])
         .register_asynchronous_uri_scheme_protocol("tile", |ctx, request, responder| {
-            let state: State<AppState> = ctx.app_handle().state();
+            let app = ctx.app_handle().clone();
             let uri = request.uri().clone();
-            let result = tile_from_uri(&state, &uri);
-            match result {
-                Ok(png) => {
-                    responder.respond(
-                        Response::builder()
-                            .header("Content-Type", "image/png")
-                            .header("Access-Control-Allow-Origin", "*")
-                            .header("Cache-Control", "no-store")
-                            .body(png)
-                            .unwrap(),
-                    );
+            // Render off the main thread. Doing this synchronously in the
+            // protocol handler blocks the event loop and makes the window
+            // stutter on every pan/zoom.
+            std::thread::spawn(move || {
+                let state: State<AppState> = app.state();
+                match tile_from_uri(&state, &uri) {
+                    Ok(png) => {
+                        responder.respond(
+                            Response::builder()
+                                .header("Content-Type", "image/png")
+                                .header("Access-Control-Allow-Origin", "*")
+                                .header("Cache-Control", "no-store")
+                                .body(png)
+                                .unwrap(),
+                        );
+                    }
+                    Err(e) => {
+                        responder.respond(
+                            Response::builder()
+                                .status(404)
+                                .header("Content-Type", "text/plain; charset=utf-8")
+                                .body(e.into_bytes())
+                                .unwrap(),
+                        );
+                    }
                 }
-                Err(e) => {
-                    responder.respond(
-                        Response::builder()
-                            .status(404)
-                            .header("Content-Type", "text/plain; charset=utf-8")
-                            .body(e.into_bytes())
-                            .unwrap(),
-                    );
-                }
-            }
+            });
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -179,6 +184,30 @@ pub mod testing {
 
     pub fn load_chunk(region_dir: &Path, cx: i32, cz: i32) -> Result<Option<ChunkData>, String> {
         crate::render::load_chunk(region_dir, cx, cz)
+    }
+
+    /// Raw decompressed chunk NBT bytes (stage 1 of the pipeline).
+    pub fn read_chunk_nbt(
+        region_dir: &Path,
+        cx: i32,
+        cz: i32,
+    ) -> Result<Option<Vec<u8>>, String> {
+        crate::region::read_chunk_nbt(region_dir, cx, cz)
+    }
+
+    /// Full NBT parse (stage 2 of the pipeline).
+    pub fn parse_nbt(data: &[u8]) -> Result<(), String> {
+        crate::nbt::parse(data).map(|_| ())
+    }
+
+    /// Generic (whole-tree) section parser, used to validate the fast one.
+    pub fn parse_sections_generic(data: &[u8]) -> Result<Vec<crate::region::Section>, String> {
+        crate::region::parse_sections(data)
+    }
+
+    /// Targeted section parser used in production.
+    pub fn parse_sections_fast(data: &[u8]) -> Result<Vec<crate::region::Section>, String> {
+        crate::region::parse_sections_fast(data)
     }
 
     /// Render a single 256x256 tile the same way the tile:// protocol does.

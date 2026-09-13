@@ -144,3 +144,138 @@ pub fn parse_sections(chunk_nbt: &[u8]) -> Result<Vec<Section>, String> {
     out.sort_by(|a, b| b.y.cmp(&a.y));
     Ok(out)
 }
+
+/// Targeted section parser: walks the NBT tree and materialises *only* the
+/// block arrays, skipping entities, tile entities and every mod-specific tag.
+///
+/// A chunk's `Entities`/`TileEntities` lists dominate its parse cost (a single
+/// GTNH chunk can hold 700+ tile entities), and none of it is rendered.
+/// Measured on the reference save this cuts parse time by roughly 3x.
+pub fn parse_sections_fast(chunk_nbt: &[u8]) -> Result<Vec<Section>, String> {
+    use nbt::Reader;
+
+    let mut r = Reader::new(chunk_nbt);
+    let root_type = r.u8()?;
+    if root_type != 10 {
+        return Err("chunk root is not a compound".into());
+    }
+    let _root_name = r.string()?;
+
+    let mut out: Vec<Section> = Vec::new();
+    let mut saw_level = false;
+
+    // ---- root compound ----
+    loop {
+        let t = r.u8()?;
+        if t == 0 {
+            break;
+        }
+        let name = r.string()?;
+        if name == "Level" && t == 10 {
+            saw_level = true;
+            parse_level(&mut r, &mut out)?;
+        } else {
+            r.skip(t, 0)?;
+        }
+    }
+
+    if !saw_level {
+        return Err("chunk has no Level tag".into());
+    }
+    out.sort_by(|a, b| b.y.cmp(&a.y));
+    Ok(out)
+}
+
+fn parse_level(r: &mut nbt::Reader, out: &mut Vec<Section>) -> Result<(), String> {
+    loop {
+        let t = r.u8()?;
+        if t == 0 {
+            break;
+        }
+        let name = r.string()?;
+        if name == "Sections" && t == 9 {
+            let elem = r.u8()?;
+            let count = r.i32()?;
+            if count < 0 {
+                return Err("negative section count".into());
+            }
+            for _ in 0..count {
+                if elem == 10 {
+                    out.push(parse_section(r)?);
+                } else {
+                    r.skip(elem, 1)?;
+                }
+            }
+        } else {
+            r.skip(t, 0)?;
+        }
+    }
+    Ok(())
+}
+
+fn parse_section(r: &mut nbt::Reader) -> Result<Section, String> {
+    let mut y = 0i32;
+    let mut blocks16 = None;
+    let mut blocks = None;
+    let mut data16 = None;
+    let mut data = None;
+    let mut add = None;
+
+    loop {
+        let t = r.u8()?;
+        if t == 0 {
+            break;
+        }
+        let name = r.string()?;
+        match (name.as_str(), t) {
+            // MC 1.7.10 stores section Y as TAG_Byte; 1.13+ uses TAG_Int.
+            ("Y", 1) => y = r.u8()? as i8 as i32,
+            ("Y", 3) => y = r.i32()?,
+            ("Blocks16", 7) => {
+                let n = r.i32()?;
+                if n < 0 {
+                    return Err("negative Blocks16".into());
+                }
+                blocks16 = Some(r.bytes(n as usize)?);
+            }
+            ("Blocks", 7) => {
+                let n = r.i32()?;
+                if n < 0 {
+                    return Err("negative Blocks".into());
+                }
+                blocks = Some(r.bytes(n as usize)?);
+            }
+            ("Data16", 7) => {
+                let n = r.i32()?;
+                if n < 0 {
+                    return Err("negative Data16".into());
+                }
+                data16 = Some(r.bytes(n as usize)?);
+            }
+            ("Data", 7) => {
+                let n = r.i32()?;
+                if n < 0 {
+                    return Err("negative Data".into());
+                }
+                data = Some(r.bytes(n as usize)?);
+            }
+            ("Add", 7) => {
+                let n = r.i32()?;
+                if n < 0 {
+                    return Err("negative Add".into());
+                }
+                add = Some(r.bytes(n as usize)?);
+            }
+            _ => r.skip(t, 1)?,
+        }
+    }
+
+    Ok(Section {
+        y,
+        blocks16,
+        blocks,
+        data16,
+        data,
+        add,
+    })
+}

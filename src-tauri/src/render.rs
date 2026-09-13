@@ -43,7 +43,7 @@ impl ChunkData {
 pub fn load_chunk(region_dir: &Path, cx: i32, cz: i32) -> Result<Option<ChunkData>, String> {
     match region::read_chunk_nbt(region_dir, cx, cz)? {
         Some(nbt_bytes) => {
-            let sections = region::parse_sections(&nbt_bytes)?;
+            let sections = region::parse_sections_fast(&nbt_bytes)?;
             Ok(Some(ChunkData { sections }))
         }
         None => Ok(None),
@@ -107,6 +107,8 @@ impl Surface {
 
     /// Fill the surface from chunks covering `chunks_per_tile`, including a
     /// 1-chunk margin on every side so edge pixels shade correctly.
+    /// Chunks are read/parsed in parallel, then written in a deterministic
+    /// order so the result does not depend on thread scheduling.
     pub fn fill(
         &mut self,
         cache: &mut TileCache,
@@ -117,14 +119,32 @@ impl Surface {
         ymax: i32,
         tint: bool,
     ) {
+        let lim = self.blocks as i32;
+
+        // 1. work out which chunks are not cached yet
+        let mut coords: Vec<(i32, i32)> = Vec::new();
         for cz in -1..=chunks_per_tile {
             for cx in -1..=chunks_per_tile {
-                cache.ensure(region_dir, chunk_x0 + cx, chunk_z0 + cz);
+                let key = (chunk_x0 + cx, chunk_z0 + cz);
+                if !cache.chunks.contains_key(&key) {
+                    coords.push(key);
+                }
+            }
+        }
+
+        // 2. read + parse the missing ones in parallel
+        if !coords.is_empty() {
+            let loaded = load_chunks_parallel(region_dir, &coords);
+            for (key, data) in loaded {
+                cache.insert_loaded(key, data);
+            }
+        }
+
+        // 3. copy the visible surface out of the cache (single-threaded, ordered)
+        for cz in -1..=chunks_per_tile {
+            for cx in -1..=chunks_per_tile {
                 let ox = cx * 16;
                 let oz = cz * 16;
-                let lim = self.blocks as i32;
-                // Copy the visible surface out of the cache before touching
-                // `self`, so the cache borrow ends here.
                 let mut hits: Vec<(i32, i32, u16, u16, i32)> = Vec::new();
                 if let Some(Some(chunk)) = cache.chunks.get(&(chunk_x0 + cx, chunk_z0 + cz)) {
                     for lz in 0..16i32 {
@@ -256,6 +276,44 @@ pub fn encode_png(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
 
 pub type ChunkKey = (i32, i32);
 
+/// Read and parse a batch of chunks across worker threads.
+/// The OS page cache and per-file seeks make this IO-light, so a simple
+/// chunked work split is enough; no new dependency needed.
+fn load_chunks_parallel(region_dir: &Path, coords: &[ChunkKey]) -> Vec<(ChunkKey, Option<ChunkData>)> {
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(8)
+        .min(coords.len().max(1));
+    if threads <= 1 || coords.len() < 4 {
+        return coords
+            .iter()
+            .map(|&k| (k, load_chunk(region_dir, k.0, k.1).ok().flatten()))
+            .collect();
+    }
+
+    let per = coords.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for batch in coords.chunks(per) {
+            handles.push(scope.spawn(move || {
+                batch
+                    .iter()
+                    .map(|&k| (k, load_chunk(region_dir, k.0, k.1).ok().flatten()))
+                    .collect::<Vec<_>>()
+            }));
+        }
+        let mut out = Vec::with_capacity(coords.len());
+        for h in handles {
+            match h.join() {
+                Ok(v) => out.extend(v),
+                Err(_) => {}
+            }
+        }
+        out
+    })
+}
+
 pub struct TileCache {
     pub chunks: HashMap<ChunkKey, Option<ChunkData>>,
     pub palette: Palette,
@@ -271,19 +329,20 @@ impl TileCache {
         }
     }
 
-    /// Load the chunk into the map if not present.
-    pub fn ensure(&mut self, region_dir: &Path, cx: i32, cz: i32) {
-        if self.chunks.contains_key(&(cx, cz)) {
-            return;
-        }
-        if self.chunks.len() >= self.capacity {
-            let keys: Vec<ChunkKey> = self.chunks.keys().take(self.capacity / 2).cloned().collect();
+    /// Insert an already-loaded chunk, evicting if over capacity.
+    pub fn insert_loaded(&mut self, key: ChunkKey, data: Option<ChunkData>) {
+        if !self.chunks.contains_key(&key) && self.chunks.len() >= self.capacity {
+            let keys: Vec<ChunkKey> = self
+                .chunks
+                .keys()
+                .take(self.capacity / 4)
+                .cloned()
+                .collect();
             for k in keys {
                 self.chunks.remove(&k);
             }
         }
-        let loaded = load_chunk(region_dir, cx, cz).ok().flatten();
-        self.chunks.insert((cx, cz), loaded);
+        self.chunks.insert(key, data);
     }
 
     pub fn invalidate(&mut self) {

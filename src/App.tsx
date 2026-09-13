@@ -3,6 +3,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { CachedTileLayer } from "./tileLayer";
 
 type Dimension = {
   id: number;
@@ -38,7 +39,6 @@ type WorldInfo = {
 
 type OpenResult = { ok: boolean; info: WorldInfo | null; error: string | null };
 
-const TILE = 256;
 const DEFAULT_SAVE = "C:\\.minecraft\\versions\\GTNH 2.8.4\\saves\\新的世界 - 副本";
 
 function tileUrl(dim: number, ymax: number) {
@@ -49,7 +49,7 @@ function tileUrl(dim: number, ymax: number) {
 export default function App() {
   const mapRef = useRef<L.Map | null>(null);
   const mapDivRef = useRef<HTMLDivElement | null>(null);
-  const layerRef = useRef<L.TileLayer | null>(null);
+  const layerRef = useRef<CachedTileLayer | null>(null);
   const markersRef = useRef<L.LayerGroup | null>(null);
   const [info, setInfo] = useState<WorldInfo | null>(null);
   const [error, setError] = useState<string>("");
@@ -78,17 +78,27 @@ export default function App() {
   };
 
   const buildTileLayer = (map: L.Map, dimension: number, ymaxVal: number) => {
+    const template = tileUrl(dimension, ymaxVal);
     if (layerRef.current) {
-      map.removeLayer(layerRef.current);
-      layerRef.current = null;
+      // Reuse the layer (and its cache) unless the world changed.
+      const changed = layerRef.current.getUrlTemplate() !== template;
+      if (changed) {
+        layerRef.current.clearCache();
+      }
+      layerRef.current.setUrlTemplate(template);
+      layerRef.current.redraw();
+      return;
     }
-    // CRS.Simple: 1 tile = 256 blocks at zoom 0 -> tileSize 256
-    const layer = L.tileLayer(tileUrl(dimension, ymaxVal), {
-      tileSize: TILE,
+    const layer = new CachedTileLayer({
       minZoom: 0,
       maxZoom: 4,
       noWrap: true,
+      maxConcurrent: 6,
+      keepBuffer: 3,
+      updateWhenIdle: false,
+      updateWhenZooming: true,
     });
+    layer.setUrlTemplate(template);
     layer.addTo(map);
     layerRef.current = layer;
   };

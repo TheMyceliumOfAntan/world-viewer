@@ -68,13 +68,13 @@ impl Tag {
     }
 }
 
-struct Reader<'a> {
+pub struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
 }
 
 impl<'a> Reader<'a> {
-    fn new(buf: &'a [u8]) -> Self {
+    pub fn new(buf: &'a [u8]) -> Self {
         Reader { buf, pos: 0 }
     }
 
@@ -91,21 +91,21 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn u8(&mut self) -> Result<u8, String> {
+    pub fn u8(&mut self) -> Result<u8, String> {
         self.need(1)?;
         let v = self.buf[self.pos];
         self.pos += 1;
         Ok(v)
     }
 
-    fn i16(&mut self) -> Result<i16, String> {
+    pub fn i16(&mut self) -> Result<i16, String> {
         self.need(2)?;
         let v = i16::from_be_bytes([self.buf[self.pos], self.buf[self.pos + 1]]);
         self.pos += 2;
         Ok(v)
     }
 
-    fn i32(&mut self) -> Result<i32, String> {
+    pub fn i32(&mut self) -> Result<i32, String> {
         self.need(4)?;
         let v = i32::from_be_bytes([
             self.buf[self.pos],
@@ -133,19 +133,86 @@ impl<'a> Reader<'a> {
         Ok(f64::from_bits(self.i64()? as u64))
     }
 
-    fn bytes(&mut self, n: usize) -> Result<Vec<u8>, String> {
+    pub fn bytes(&mut self, n: usize) -> Result<Vec<u8>, String> {
         self.need(n)?;
         let v = self.buf[self.pos..self.pos + n].to_vec();
         self.pos += n;
         Ok(v)
     }
 
-    fn string(&mut self) -> Result<String, String> {
+    pub fn string(&mut self) -> Result<String, String> {
         let n = self.i16()? as usize;
         self.need(n)?;
         let s = String::from_utf8_lossy(&self.buf[self.pos..self.pos + n]).into_owned();
         self.pos += n;
         Ok(s)
+    }
+
+    /// Validate bounds and advance past `n` bytes.
+    fn skip_bytes(&mut self, n: usize) -> Result<(), String> {
+        self.need(n)?;
+        self.pos += n;
+        Ok(())
+    }
+
+    /// Advance past a payload of `tag_type` without materialising it.
+    /// This is what makes loading chunks cheap: entities, tile entities and
+    /// mod metadata make up the bulk of a chunk's NBT but are never rendered.
+    pub fn skip(&mut self, tag_type: u8, depth: u32) -> Result<(), String> {
+        if depth > 64 {
+            return Err("nbt too deep".into());
+        }
+        match tag_type {
+            1 => self.skip_bytes(1)?,
+            2 => self.skip_bytes(2)?,
+            3 | 5 => self.skip_bytes(4)?,
+            4 | 6 => self.skip_bytes(8)?,
+            7 => {
+                let n = self.i32()?;
+                if n < 0 {
+                    return Err("negative array len".into());
+                }
+                self.skip_bytes(n as usize)?;
+            }
+            8 => {
+                let n = self.i16()? as usize;
+                self.skip_bytes(n)?;
+            }
+            9 => {
+                let elem = self.u8()?;
+                let n = self.i32()?;
+                if n < 0 {
+                    return Err("negative list len".into());
+                }
+                for _ in 0..n {
+                    self.skip(elem, depth + 1)?;
+                }
+            }
+            10 => loop {
+                let t = self.u8()?;
+                if t == 0 {
+                    break;
+                }
+                let _name = self.string()?;
+                self.skip(t, depth + 1)?;
+            },
+            11 => {
+                let n = self.i32()?;
+                if n < 0 {
+                    return Err("negative array len".into());
+                }
+                self.skip_bytes(n as usize * 4)?;
+            }
+            12 => {
+                let n = self.i32()?;
+                if n < 0 {
+                    return Err("negative array len".into());
+                }
+                self.skip_bytes(n as usize * 8)?;
+            }
+            other => return Err(format!("unknown nbt tag type {}", other)),
+        }
+        Ok(())
     }
 
     fn payload(&mut self, tag_type: u8, depth: u32) -> Result<Tag, String> {
