@@ -101,6 +101,8 @@ export default function App() {
     layer.setUrlTemplate(template);
     layer.addTo(map);
     layerRef.current = layer;
+    // Exposed for diagnostics / automated tests.
+    (window as unknown as { __tileLayer?: CachedTileLayer }).__tileLayer = layer;
   };
 
   const drawMarkers = (map: L.Map, world: WorldInfo, dimension: number) => {

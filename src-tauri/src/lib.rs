@@ -83,7 +83,7 @@ fn render_tile_png(
     x: i32,
     row: i32,
     ymax_u: u32,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, bool), String> {
     let world_guard = state.world.lock().unwrap();
     let world = world_guard.as_ref().ok_or("未加载世界")?;
     let dim_info = world.dimension(dim).ok_or("维度不存在")?;
@@ -97,7 +97,8 @@ fn render_tile_png(
     let mut cache_guard = state.cache.lock().unwrap();
     let cache = cache_guard.as_mut().ok_or("缓存未初始化")?;
 
-    render::render_tile(cache, &region_dir, z, x, row, ymax)
+    let (png, has_data) = render::render_tile(cache, &region_dir, z, x, row, ymax)?;
+    Ok((png, has_data))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -120,12 +121,16 @@ pub fn run() {
             std::thread::spawn(move || {
                 let state: State<AppState> = app.state();
                 match tile_from_uri(&state, &uri) {
-                    Ok(png) => {
+                    Ok((png, has_data)) => {
                         responder.respond(
                             Response::builder()
                                 .header("Content-Type", "image/png")
                                 .header("Access-Control-Allow-Origin", "*")
                                 .header("Cache-Control", "no-store")
+                                // Lets the frontend distinguish "nothing generated
+                                // here" from "still loading".
+                                .header("X-Tile-Empty", if has_data { "0" } else { "1" })
+                                .header("Access-Control-Expose-Headers", "X-Tile-Empty")
                                 .body(png)
                                 .unwrap(),
                         );
@@ -147,7 +152,7 @@ pub fn run() {
 }
 
 /// tile://localhost/{dim}/{z}/{x}/{row}.png?ymax=N
-fn tile_from_uri(state: &AppState, uri: &tauri::http::Uri) -> Result<Vec<u8>, String> {
+fn tile_from_uri(state: &AppState, uri: &tauri::http::Uri) -> Result<(Vec<u8>, bool), String> {
     let path = uri.path().trim_start_matches('/');
     let path = path.trim_end_matches(".png");
     let parts: Vec<&str> = path.split('/').collect();
@@ -220,6 +225,21 @@ pub mod testing {
         tile_row: i32,
         ymax: i32,
     ) -> Result<Vec<u8>, String> {
+        let mut cache = crate::render::TileCache::new(palette.clone(), 512);
+        crate::render::render_tile(&mut cache, region_dir, zoom, tile_x, tile_row, ymax)
+            .map(|(png, _has_data)| png)
+    }
+
+    /// Like `render_tile` but also reports whether the tile covers any
+    /// generated chunks (used to distinguish "no data" from "not loaded").
+    pub fn render_tile_with_data_flag(
+        palette: &Palette,
+        region_dir: &Path,
+        zoom: i32,
+        tile_x: i32,
+        tile_row: i32,
+        ymax: i32,
+    ) -> Result<(Vec<u8>, bool), String> {
         let mut cache = crate::render::TileCache::new(palette.clone(), 512);
         crate::render::render_tile(&mut cache, region_dir, zoom, tile_x, tile_row, ymax)
     }

@@ -231,6 +231,9 @@ impl Surface {
 }
 
 /// Render one tile (TILE_SIZE x TILE_SIZE) with relief shading.
+/// Returns (png_bytes, has_any_data). `has_any_data == false` means the tile
+/// covers no generated chunks at all, which the frontend renders differently
+/// from a tile that simply has not loaded yet.
 pub fn render_tile(
     cache: &mut TileCache,
     region_dir: &Path,
@@ -238,7 +241,7 @@ pub fn render_tile(
     tile_x: i32,
     tile_row: i32,
     ymax: i32,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, bool), String> {
     if !(0..=4).contains(&zoom) {
         return Err(format!("zoom {} out of range 0..=4", zoom));
     }
@@ -258,8 +261,17 @@ pub fn render_tile(
         ymax,
         true,
     );
+    // Only the tile's own area counts. The surface carries a 1-block margin
+    // for hillshading, and those margin pixels are not rendered, so including
+    // them would report "has data" for a tile that renders fully transparent.
+    let has_data = (0..blocks as i32).any(|z| {
+        (0..blocks as i32).any(|x| surface.height[surface.idx(x, z)] != EMPTY)
+    });
     surface.shade();
-    Ok(encode_png(&surface.to_rgba(), TILE_SIZE as u32, TILE_SIZE as u32))
+    Ok((
+        encode_png(&surface.to_rgba(), TILE_SIZE as u32, TILE_SIZE as u32),
+        has_data,
+    ))
 }
 
 pub fn encode_png(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {

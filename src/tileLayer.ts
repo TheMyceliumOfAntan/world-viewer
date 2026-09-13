@@ -1,5 +1,8 @@
 import L from "leaflet";
 
+/** A decoded tile plus whether the server says it has no generated chunks. */
+type TileImage = { bitmap: ImageBitmap; isEmpty: boolean };
+
 /**
  * A tile layer that never leaves holes while loading.
  *
@@ -8,16 +11,25 @@ import L from "leaflet";
  * layer keeps an in-memory cache and falls back to the already-loaded parent
  * tile (drawn scaled and cropped to the right quadrant) so the map stays
  * continuous, just blurrier, until the sharp tile arrives.
+ *
+ * Leaflet may ask for the same tile again while its request is still in
+ * flight (it rebuilds tile elements on zoom/pan). Every caller's `done`
+ * callback must therefore be retained and fired together, otherwise the
+ * tile stays permanently blank.
  */
 export class CachedTileLayer extends L.GridLayer {
-  private cache = new Map<string, HTMLImageElement>();
-  private inflight = new Set<string>();
+  private cache = new Map<string, ImageBitmap>();
+  /** Tiles the server reported as covering no generated chunks. */
+  private empty = new Set<string>();
+  /** Pending callbacks per tile key; all fire when the image resolves. */
+  private waiting = new Map<string, Array<(img: TileImage | null) => void>>();
   private queue: Array<() => void> = [];
   private active = 0;
 
   /** Keyed by `dim|ymax` — changing either invalidates every tile. */
   private urlTemplate = "";
   private maxConcurrent: number;
+  private failures = new Set<string>();
 
   constructor(options?: L.GridLayerOptions & { maxConcurrent?: number }) {
     super({ tileSize: 256, ...options });
@@ -27,6 +39,8 @@ export class CachedTileLayer extends L.GridLayer {
   setUrlTemplate(template: string) {
     if (this.urlTemplate === template) return;
     this.urlTemplate = template;
+    this.failures.clear();
+    this.empty.clear();
     this.redraw();
   }
 
@@ -37,6 +51,21 @@ export class CachedTileLayer extends L.GridLayer {
   /** Drop cached tiles for the previous world/height without touching the map. */
   clearCache() {
     this.cache.clear();
+    this.waiting.clear();
+    this.failures.clear();
+    this.empty.clear();
+  }
+
+  /** Diagnostics for tests and the status bar. */
+  stats() {
+    return {
+      cached: this.cache.size,
+      waiting: this.waiting.size,
+      queued: this.queue.length,
+      active: this.active,
+      failed: this.failures.size,
+      empty: this.empty.size,
+    };
   }
 
   private urlFor(coords: { z: number; x: number; y: number }): string {
@@ -65,29 +94,66 @@ export class CachedTileLayer extends L.GridLayer {
     this.pump();
   }
 
-  private load(key: string, url: string, onReady: (img: HTMLImageElement | null) => void) {
+  private resolveWaiters(key: string, img: TileImage | null) {
+    const list = this.waiting.get(key);
+    if (!list) return;
+    this.waiting.delete(key);
+    for (const cb of list) cb(img);
+  }
+
+  private load(key: string, url: string, onReady: (img: TileImage | null) => void) {
     const cached = this.cache.get(key);
     if (cached) {
-      onReady(cached);
+      onReady({ bitmap: cached, isEmpty: this.empty.has(key) });
       return;
     }
-    if (this.inflight.has(key)) return;
-    this.inflight.add(key);
+
+    // Already requested: subscribe instead of dropping the callback.
+    const pending = this.waiting.get(key);
+    if (pending) {
+      pending.push(onReady);
+      return;
+    }
+
+    if (this.failures.has(key)) {
+      onReady(null);
+      return;
+    }
+
+    this.waiting.set(key, [onReady]);
     this.enqueue(() => {
-      const img = new Image();
-      img.onload = () => {
-        this.cache.set(key, img);
-        this.inflight.delete(key);
-        this.done();
-        onReady(img);
-      };
-      img.onerror = () => {
-        this.inflight.delete(key);
-        this.done();
-        onReady(null);
-      };
-      img.src = url;
+      // Use fetch so the X-Tile-Empty header (no generated chunks here) is
+      // readable; an <img> would hide it.
+      fetch(url, { mode: "cors" })
+        .then(async (resp) => {
+          if (!resp.ok) throw new Error(String(resp.status));
+          const isEmpty = resp.headers.get("X-Tile-Empty") === "1";
+          const blob = await resp.blob();
+          const bitmap = await createImageBitmap(blob);
+          this.cache.set(key, bitmap);
+          this.done();
+          if (isEmpty) this.empty.add(key);
+          else this.empty.delete(key);
+          this.resolveWaiters(key, { bitmap, isEmpty });
+        })
+        .catch(() => {
+          this.failures.add(key);
+          this.done();
+          this.resolveWaiters(key, null);
+        });
     });
+  }
+
+  /** Draw a faint checkerboard: "this area was never generated". */
+  private drawEmptyPattern(ctx: CanvasRenderingContext2D, size: L.Point) {
+    const cell = 16;
+    for (let y = 0; y < size.y; y += cell) {
+      for (let x = 0; x < size.x; x += cell) {
+        const odd = ((x / cell) + (y / cell)) % 2 === 0;
+        ctx.fillStyle = odd ? "rgba(255,255,255,0.035)" : "rgba(255,255,255,0.07)";
+        ctx.fillRect(x, y, cell, cell);
+      }
+    }
   }
 
   createTile(coords: L.Coords, done: L.DoneCallback): HTMLElement {
@@ -119,13 +185,20 @@ export class CachedTileLayer extends L.GridLayer {
 
     this.load(key, this.urlFor(coords), (img) => {
       if (!img) {
-        // Nothing rendered yet and the tile failed: leave it transparent.
+        // Leave whatever the parent fallback drew (possibly nothing) and let
+        // Leaflet know the request settled so it does not wait forever.
         done(undefined, canvas);
         return;
       }
       ctx.imageSmoothingEnabled = false;
       ctx.clearRect(0, 0, size.x, size.y);
-      ctx.drawImage(img, 0, 0, size.x, size.y);
+      if (img.isEmpty) {
+        // The area exists on the map but was never generated in this save.
+        // Mark it so it is not confused with a tile that is still loading.
+        this.drawEmptyPattern(ctx, size);
+      } else {
+        ctx.drawImage(img.bitmap, 0, 0, size.x, size.y);
+      }
       canvas.style.opacity = "1";
       done(undefined, canvas);
     });

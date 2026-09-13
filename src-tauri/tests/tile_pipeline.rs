@@ -70,6 +70,66 @@ fn render_cave_slice_differs_from_surface() {
     eprintln!("surface {} bytes vs cave {} bytes", surface.len(), cave.len());
 }
 
+/// A tile whose own area is empty must be flagged empty even when its
+/// hillshading margin overlaps generated chunks. Getting this wrong makes the
+/// frontend show a fully transparent tile as if it were still loading.
+#[test]
+fn empty_tile_is_flagged_even_with_populated_margin() {
+    let dir = PathBuf::from(r"C:\.minecraft\versions\GTNH 2.8.4\saves\新的世界 - 副本");
+    if !dir.is_dir() {
+        eprintln!("SKIP: test save not present");
+        return;
+    }
+    let world = testing::open_world(&dir).expect("open world");
+    let region_dir = dir.join("region");
+
+    // Find one tile with data and one without, at the same zoom, and assert
+    // the flag matches what the PNG actually contains.
+    let mut saw_data = false;
+    let mut saw_empty = false;
+    for tx in -4..=2 {
+        for ty in -8..=-1 {
+            let (png, has_data) = testing::render_tile_with_data_flag(
+                &world.palette,
+                &region_dir,
+                2,
+                tx,
+                ty,
+                255,
+            )
+            .unwrap();
+            let opaque = count_opaque(&png);
+            if has_data {
+                assert!(
+                    opaque > 0,
+                    "tile ({},{}) flagged has_data but PNG has no opaque pixels",
+                    tx,
+                    ty
+                );
+                saw_data = true;
+            } else {
+                assert_eq!(
+                    opaque, 0,
+                    "tile ({},{}) flagged empty but PNG has {} opaque pixels",
+                    tx, ty, opaque
+                );
+                saw_empty = true;
+            }
+        }
+    }
+    assert!(saw_data, "expected at least one populated tile in range");
+    assert!(saw_empty, "expected at least one empty tile in range");
+    eprintln!("has_data flag matches PNG contents for both populated and empty tiles");
+}
+
+fn count_opaque(png: &[u8]) -> usize {
+    let decoder = png::Decoder::new(png);
+    let mut reader = decoder.read_info().expect("valid png");
+    let mut buf = vec![0; reader.output_buffer_size()];
+    reader.next_frame(&mut buf).unwrap();
+    buf.chunks(4).filter(|p| p[3] > 0).count()
+}
+
 /// Relief shading must produce visible variation in real terrain.
 /// Without it, flat plains collapse to a single flat colour (the reported bug).
 #[test]
