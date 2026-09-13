@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone)]
 pub struct Palette {
     /// uid -> meta -> (rgb, name)
     by_uid: HashMap<String, HashMap<u16, ([u8; 3], String)>>,

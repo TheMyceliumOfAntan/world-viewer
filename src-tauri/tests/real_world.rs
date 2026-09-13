@@ -105,16 +105,21 @@ fn renders_chunk_to_non_empty_image() {
         return;
     }
     let region_dir = dir.join("region");
-    let chunk = testing::load_chunk(&region_dir, 1, 1)
-        .expect("read failed")
-        .expect("chunk exists");
     let world = testing::open_world(&dir).expect("open world");
-    let buf = testing::render_chunk(&chunk, &world.palette, 255);
-    let colored = buf.iter().filter(|c| **c != [0, 0, 0]).count();
+    // chunk (1,1) lives in tile (0,0) at zoom 0
+    let png = testing::render_tile(&world.palette, &region_dir, 0, 0, 0, 0, 255)
+        .expect("render tile");
+    let decoder = png::Decoder::new(&png[..]);
+    let mut reader = decoder.read_info().expect("valid png");
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).unwrap();
+    let opaque = buf.chunks(4).filter(|p| p[3] > 0).count();
     assert!(
-        colored > 200,
-        "rendered chunk mostly empty: {} colored pixels",
-        colored
+        opaque > 200,
+        "rendered tile mostly empty: {} opaque pixels ({}x{})",
+        opaque,
+        info.width,
+        info.height
     );
 }
 

@@ -28,9 +28,6 @@ impl Default for AppState {
     }
 }
 
-const TILE_SIZE: u32 = 256;
-const CHUNKS_PER_TILE: i32 = 16;
-
 #[derive(serde::Serialize)]
 struct OpenResult {
     ok: bool,
@@ -100,65 +97,7 @@ fn render_tile_png(
     let mut cache_guard = state.cache.lock().unwrap();
     let cache = cache_guard.as_mut().ok_or("缓存未初始化")?;
 
-    if !(0..=4).contains(&z) {
-        return Err(format!("zoom {} out of range 0..=4", z));
-    }
-    // z=0 -> 16 chunks/tile (1 px per block), z=4 -> 1 chunk/tile (16 px per block)
-    let chunks_per_tile = CHUNKS_PER_TILE >> z;
-    let chunk_size_px = TILE_SIZE as i32 / chunks_per_tile;
-    let world_chunk_x = x * chunks_per_tile;
-    let world_chunk_z = row * chunks_per_tile;
-
-    for cz in 0..chunks_per_tile {
-        for cx in 0..chunks_per_tile {
-            cache.ensure(&region_dir, world_chunk_x + cx, world_chunk_z + cz);
-        }
-    }
-
-    let mut img = vec![0u8; (crate::TILE_SIZE * crate::TILE_SIZE * 4) as usize];
-    for cz in 0..chunks_per_tile {
-        for cx in 0..chunks_per_tile {
-            let gcx = world_chunk_x + cx;
-            let gcz = world_chunk_z + cz;
-            if let Some(chunk) = cache.chunks.get(&(gcx, gcz)).and_then(|o| o.as_ref()) {
-                let buf = render::render_chunk(chunk, &cache.palette, ymax, true);
-                let px0 = (cx * chunk_size_px) as usize;
-                let py0 = (cz * chunk_size_px) as usize;
-                let span = chunk_size_px as usize;
-                for zz in 0..span {
-                    for xx in 0..span {
-                        let sx = xx * 16 / span.max(1);
-                        let sz = zz * 16 / span.max(1);
-                        let rgb = buf[sz.min(15) * 16 + sx.min(15)];
-                        if rgb == [0, 0, 0] {
-                            continue;
-                        }
-                        let px = px0 + xx;
-                        let py = py0 + zz;
-                        let idx = (py * crate::TILE_SIZE as usize + px) * 4;
-                        img[idx] = rgb[0];
-                        img[idx + 1] = rgb[1];
-                        img[idx + 2] = rgb[2];
-                        img[idx + 3] = 255;
-                    }
-                }
-            }
-        }
-    }
-
-    encode_png(&img, TILE_SIZE, TILE_SIZE)
-}
-
-fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut out, w, h);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
-        writer.write_image_data(rgba).map_err(|e| e.to_string())?;
-    }
-    Ok(out)
+    render::render_tile(cache, &region_dir, z, x, row, ymax)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -229,7 +168,7 @@ fn tile_from_uri(state: &AppState, uri: &tauri::http::Uri) -> Result<Vec<u8>, St
 /// Exposed for tests
 pub mod testing {
     pub use crate::palette::Palette;
-    pub use crate::render::{render_chunk as render_chunk_impl, ChunkData};
+    pub use crate::render::ChunkData;
     pub use crate::world::World;
 
     use std::path::{Path, PathBuf};
@@ -242,10 +181,6 @@ pub mod testing {
         crate::render::load_chunk(region_dir, cx, cz)
     }
 
-    pub fn render_chunk(chunk: &ChunkData, palette: &Palette, ymax: i32) -> Vec<[u8; 3]> {
-        render_chunk_impl(chunk, palette, ymax, true)
-    }
-
     /// Render a single 256x256 tile the same way the tile:// protocol does.
     pub fn render_tile(
         palette: &Palette,
@@ -256,45 +191,8 @@ pub mod testing {
         tile_row: i32,
         ymax: i32,
     ) -> Result<Vec<u8>, String> {
-        let chunks_per_tile = crate::CHUNKS_PER_TILE >> zoom;
-        if chunks_per_tile < 1 {
-            return Err("zoom out of range".into());
-        }
-        let chunk_size_px = crate::TILE_SIZE as i32 / chunks_per_tile;
-        let world_chunk_x = tile_x * chunks_per_tile;
-        let world_chunk_z = tile_row * chunks_per_tile;
-
-        let mut img = vec![0u8; (crate::TILE_SIZE * crate::TILE_SIZE * 4) as usize];
-        for cz in 0..chunks_per_tile {
-            for cx in 0..chunks_per_tile {
-                let gcx = world_chunk_x + cx;
-                let gcz = world_chunk_z + cz;
-                if let Some(chunk) = load_chunk(region_dir, gcx, gcz)? {
-                    let buf = render_chunk_impl(&chunk, palette, ymax, true);
-                    let px0 = (cx * chunk_size_px) as usize;
-                    let py0 = (cz * chunk_size_px) as usize;
-                    let span = chunk_size_px as usize;
-                    for zz in 0..span {
-                        for xx in 0..span {
-                            let sx = xx * 16 / span.max(1);
-                            let sz = zz * 16 / span.max(1);
-                            let rgb = buf[sz.min(15) * 16 + sx.min(15)];
-                            if rgb == [0, 0, 0] {
-                                continue;
-                            }
-                            let px = px0 + xx;
-                            let py = py0 + zz;
-                            let idx = (py * crate::TILE_SIZE as usize + px) * 4;
-                            img[idx] = rgb[0];
-                            img[idx + 1] = rgb[1];
-                            img[idx + 2] = rgb[2];
-                            img[idx + 3] = 255;
-                        }
-                    }
-                }
-            }
-        }
-        crate::encode_png(&img, crate::TILE_SIZE, crate::TILE_SIZE)
+        let mut cache = crate::render::TileCache::new(palette.clone(), 512);
+        crate::render::render_tile(&mut cache, region_dir, zoom, tile_x, tile_row, ymax)
     }
 
     #[allow(dead_code)]

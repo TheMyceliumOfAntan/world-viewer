@@ -69,3 +69,57 @@ fn render_cave_slice_differs_from_surface() {
     );
     eprintln!("surface {} bytes vs cave {} bytes", surface.len(), cave.len());
 }
+
+/// Relief shading must produce visible variation in real terrain.
+/// Without it, flat plains collapse to a single flat colour (the reported bug).
+#[test]
+fn relief_shading_produces_height_variation() {
+    let dir = PathBuf::from(r"C:\.minecraft\versions\GTNH 2.8.4\saves\新的世界 - 副本");
+    if !dir.is_dir() {
+        eprintln!("SKIP: test save not present");
+        return;
+    }
+    let world = testing::open_world(&dir).expect("open world");
+    let region_dir = dir.join("region");
+    let png = testing::render_tile(&world.palette, &region_dir, 0, 0, -2, -2, 255).unwrap();
+
+    let decoder = png::Decoder::new(&png[..]);
+    let mut reader = decoder.read_info().unwrap();
+    let mut buf = vec![0; reader.output_buffer_size()];
+    reader.next_frame(&mut buf).unwrap();
+
+    // Count distinct colours among opaque pixels: relief shading must create
+    // many shades of the same base block colour.
+    let mut colors = std::collections::HashSet::new();
+    for px in buf.chunks(4) {
+        if px[3] > 0 {
+            colors.insert([px[0], px[1], px[2]]);
+        }
+    }
+    assert!(
+        colors.len() > 400,
+        "expected rich shading variation, got only {} distinct colours",
+        colors.len()
+    );
+
+    // Luminance spread must be non-trivial (i.e. not one flat value).
+    let lums: Vec<u32> = buf
+        .chunks(4)
+        .filter(|p| p[3] > 0)
+        .map(|p| (p[0] as u32 * 30 + p[1] as u32 * 59 + p[2] as u32 * 11) / 100)
+        .collect();
+    let min = *lums.iter().min().unwrap();
+    let max = *lums.iter().max().unwrap();
+    assert!(
+        max - min > 60,
+        "luminance range too flat: {}..{} (relief shading not applied?)",
+        min,
+        max
+    );
+    eprintln!(
+        "relief check: {} distinct colours, luminance {}..{}",
+        colors.len(),
+        min,
+        max
+    );
+}
