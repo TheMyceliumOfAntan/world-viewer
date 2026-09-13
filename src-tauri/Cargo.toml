@@ -1,0 +1,26 @@
+[package]
+name = "world-viewer"
+version = "0.1.0"
+description = "Minecraft world viewer for modded 1.7.10 saves (GTNH)"
+edition = "2021"
+
+[lib]
+name = "world_viewer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+flate2 = "1"
+png = "0.17"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
