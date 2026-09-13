@@ -81,6 +81,47 @@ pub fn load_chunk(region_dir: &Path, cx: i32, cz: i32) -> Result<Option<ChunkDat
     }
 }
 
+/// Blocks whose texture is grey and must be multiplied by a biome colour.
+///
+/// The JourneyMap palette stores the *untinted* texture colour for these, so
+/// without this they render as flat grey — which is what made grass and
+/// tall grass look black-and-white while stone and dirt looked fine.
+pub fn is_foliage(name: &str) -> bool {
+    let base = name.split('[').next().unwrap_or(name);
+    // Strip any namespace, not just "minecraft:" — modded ids like
+    // "BiomesOPlenty:foliage" must classify the same way.
+    let short = base.split(':').next_back().unwrap_or(base);
+    let lower = short.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "grass" | "grass_block" | "leaves" | "leaves2" | "tallgrass" | "vine"
+            | "waterlily" | "double_plant" | "yellow_flower" | "red_flower"
+            | "sapling" | "grass_path" | "foliage" | "bush" | "shrub"
+            | "plant" | "flower" | "crop" | "stem" | "mushroom" | "lilybop"
+    ) || lower.ends_with("_leaves")
+        || lower.ends_with("leaves")
+        || lower.ends_with("_sapling")
+        || lower.ends_with("_vine")
+        || lower.ends_with("_foliage")
+        || lower.ends_with("_plant")
+        || lower.ends_with("_flower")
+        || lower.ends_with("_grass")
+        || lower.contains("tallgrass")
+        || lower.contains("foliage")
+        || lower.contains("lily")
+}
+
+/// Multiply an untinted (grey) texture colour by a temperate biome green.
+pub fn apply_foliage_tint(c: [u8; 3]) -> [u8; 3] {
+    // Standard Minecraft plains grass colour.
+    const BIOME: [f32; 3] = [0x79 as f32, 0xc0 as f32, 0x5a as f32];
+    [
+        (c[0] as f32 / 255.0 * BIOME[0]).min(255.0) as u8,
+        (c[1] as f32 / 255.0 * BIOME[1]).min(255.0) as u8,
+        (c[2] as f32 / 255.0 * BIOME[2]).min(255.0) as u8,
+    ]
+}
+
 /// Directional relief shading, in the spirit of VoxelMap's `applyHeight()`.
 /// Light comes from the north-west, so slopes rising toward NW are lit.
 /// `h` is a square height buffer of width `w` with a 1-block margin already applied.
@@ -197,19 +238,8 @@ impl Surface {
                     let (rgb, _src, name) = cache.palette.color_ref(&block);
                     let mut c = rgb;
                     if tint {
-                        // Approximate foliage tint; JourneyMap stores the grey
-                        // texture colour for grass/leaves, so apply the green.
-                        let base = name.split('[').next().unwrap_or(&name);
-                        if base == "minecraft:grass"
-                            || base == "minecraft:grass_block"
-                            || base.ends_with("_leaves")
-                            || base == "minecraft:leaves"
-                        {
-                            c = [
-                                (c[0] as f32 * 0.55 + 60.0) as u8,
-                                (c[1] as f32 * 0.85 + 40.0) as u8,
-                                (c[2] as f32 * 0.45) as u8,
-                            ];
+                        if is_foliage(&name) {
+                            c = apply_foliage_tint(c);
                         }
                     }
                     let i = self.idx(gx, gz);

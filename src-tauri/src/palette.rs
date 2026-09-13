@@ -46,10 +46,15 @@ impl Palette {
     pub fn load(instance_root: &Path, level_dat: &Path) -> Result<Self, String> {
         let mut pal = Palette::empty();
 
-        // block id -> name from level.dat FML.ItemData (\x01 = blocks)
+        // Block names come from one of three places, in order of specificity:
+        //   1. level.dat FML.ItemData  (1.7.10, lists every block)
+        //   2. level.dat FML.Registries.minecraft:blocks.ids (1.12, modded only)
+        //   3. built-in vanilla tables (1.7.10 / 1.12.2)
+        // Later sources only fill gaps, so modded ids always win.
         if let Ok(bytes) = std::fs::read(level_dat) {
             if let Ok(decompressed) = decompress_gzip(&bytes) {
                 if let Ok((_, root)) = crate::nbt::parse(&decompressed) {
+                    // --- 1.7.10 ItemData ---
                     if let Some(list) = root
                         .get("FML")
                         .and_then(|f| f.get("ItemData"))
@@ -69,8 +74,40 @@ impl Palette {
                             }
                         }
                     }
+                    // --- 1.12 registry (modded blocks only) ---
+                    if let Some(list) = root
+                        .get("FML")
+                        .and_then(|f| f.get("Registries"))
+                        .and_then(|r| r.get("minecraft:blocks"))
+                        .and_then(|b| b.get("ids"))
+                        .and_then(|t| t.as_list())
+                    {
+                        for e in list {
+                            let k = e.get("K").and_then(|t| t.as_str());
+                            let v = e.get("V").and_then(|t| t.as_i32());
+                            if let (Some(k), Some(v)) = (k, v) {
+                                if v >= 0 && v <= u16::MAX as i32 {
+                                    pal.block_names.entry(v as u16).or_insert_with(|| k.to_string());
+                                }
+                            }
+                        }
+                    }
                 }
             }
+        }
+
+        // --- vanilla fallbacks (only fill ids we still do not know) ---
+        let modern = pal
+            .block_names
+            .keys()
+            .any(|k| *k > 175 && *k < 256);
+        let table = if modern {
+            crate::legacy_ids::VANILLA_1_12_2
+        } else {
+            crate::legacy_ids::VANILLA_1_7_10
+        };
+        for (id, name) in table {
+            pal.block_names.entry(*id).or_insert_with(|| name.to_string());
         }
 
         // colors from JourneyMap colorpalette.json
@@ -141,6 +178,11 @@ impl Palette {
 
     pub fn by_uid_len(&self) -> usize {
         self.by_uid.len()
+    }
+
+    /// Number of block ids that have a name (legacy formats).
+    pub fn block_names_len(&self) -> usize {
+        self.block_names.len()
     }
 
     pub fn name_of(&self, id: u16) -> String {

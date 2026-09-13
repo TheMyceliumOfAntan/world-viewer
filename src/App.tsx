@@ -42,9 +42,18 @@ type OpenResult = { ok: boolean; info: WorldInfo | null; error: string | null };
 
 const DEFAULT_SAVE = "C:\\.minecraft\\versions\\GTNH 2.8.4\\saves\\新的世界 - 副本";
 
-function tileUrl(dim: number, ymax: number) {
+function tileUrl(dim: number, ymax: number, worldKey: string) {
   const yPart = ymax >= 255 ? "4294967295" : String(ymax);
-  return `http://tile.localhost/${dim}/{z}/{x}/{y}.png?ymax=${yPart}`;
+  return `http://tile.localhost/${worldKey}/${dim}/{z}/{x}/{y}.png?ymax=${yPart}`;
+}
+
+/** Short, filesystem-safe key identifying a save, so tile URLs differ per world. */
+function worldKeyOf(saveDir: string): string {
+  let h = 0;
+  for (let i = 0; i < saveDir.length; i++) {
+    h = (Math.imul(31, h) + saveDir.charCodeAt(i)) | 0;
+  }
+  return "w" + (h >>> 0).toString(36);
 }
 
 /** Per-source waypoint counts for the current dimension. */
@@ -78,6 +87,7 @@ export default function App() {
   const mapRef = useRef<L.Map | null>(null);
   const mapDivRef = useRef<HTMLDivElement | null>(null);
   const layerRef = useRef<CachedTileLayer | null>(null);
+  const worldKeyRef = useRef<string>("none");
   const markersRef = useRef<L.LayerGroup | null>(null);
   const [info, setInfo] = useState<WorldInfo | null>(null);
   const [error, setError] = useState<string>("");
@@ -106,9 +116,11 @@ export default function App() {
   };
 
   const buildTileLayer = (map: L.Map, dimension: number, ymaxVal: number) => {
-    const template = tileUrl(dimension, ymaxVal);
+    const template = tileUrl(dimension, ymaxVal, worldKeyRef.current);
     if (layerRef.current) {
-      // Reuse the layer (and its cache) unless the world changed.
+      // Reuse the layer (and its cache) unless the world or the height
+      // filter changed. The world key is part of the URL, so switching saves
+      // is detected here and drops the previous world's tiles.
       const changed = layerRef.current.getUrlTemplate() !== template;
       if (changed) {
         layerRef.current.clearCache();
@@ -188,7 +200,17 @@ export default function App() {
       setInfo(res.info);
       const map = ensureMap();
       if (!map || !res.info) return;
-      const firstDim = res.info.dimensions[0]?.id ?? 0;
+      // Key tiles by save so switching worlds cannot reuse stale tiles.
+      // Clearing here (rather than relying on the URL differing) makes the
+      // invariant explicit: a freshly opened world starts with no tiles.
+      worldKeyRef.current = worldKeyOf(res.info.save_dir);
+      layerRef.current?.clearCache();
+      // Prefer the first dimension that actually has chunks, so a save whose
+      // first listed dimension is empty does not open on a blank map.
+      const firstDim =
+        res.info.dimensions.find((d) => d.has_data)?.id ??
+        res.info.dimensions[0]?.id ??
+        0;
       setDim(firstDim);
       setYmax(255);
       buildTileLayer(map, firstDim, 255);

@@ -1,3 +1,4 @@
+mod legacy_ids;
 mod nbt;
 mod palette;
 mod region;
@@ -152,17 +153,23 @@ pub fn run() {
 }
 
 /// tile://localhost/{dim}/{z}/{x}/{row}.png?ymax=N
+/// tile://localhost/{worldKey}/{dim}/{z}/{x}/{row}.png?ymax=N
+///
+/// `worldKey` identifies the loaded save. It is not used for lookup — the
+/// app only ever has one world open — but it must be present so that the
+/// browser's tile cache and the frontend's tile cache are keyed per world.
+/// Without it, switching saves would keep serving the previous world's tiles.
 fn tile_from_uri(state: &AppState, uri: &tauri::http::Uri) -> Result<(Vec<u8>, bool), String> {
     let path = uri.path().trim_start_matches('/');
     let path = path.trim_end_matches(".png");
     let parts: Vec<&str> = path.split('/').collect();
-    if parts.len() != 4 {
+    if parts.len() != 5 {
         return Err(format!("bad tile path: {}", uri.path()));
     }
-    let dim: i32 = parts[0].parse().map_err(|_| "bad dim".to_string())?;
-    let z: i32 = parts[1].parse().map_err(|_| "bad z".to_string())?;
-    let x: i32 = parts[2].parse().map_err(|_| "bad x".to_string())?;
-    let row: i32 = parts[3].parse().map_err(|_| "bad row".to_string())?;
+    let dim: i32 = parts[1].parse().map_err(|_| "bad dim".to_string())?;
+    let z: i32 = parts[2].parse().map_err(|_| "bad z".to_string())?;
+    let x: i32 = parts[3].parse().map_err(|_| "bad x".to_string())?;
+    let row: i32 = parts[4].parse().map_err(|_| "bad row".to_string())?;
     let ymax = uri
         .query()
         .and_then(|q| {
@@ -180,6 +187,16 @@ pub mod testing {
     pub use crate::palette::Palette;
     pub use crate::render::{BlockRef, ChunkData};
     pub use crate::world::World;
+
+    /// Whether a block name is foliage that needs a biome tint.
+    pub fn is_foliage(name: &str) -> bool {
+        crate::render::is_foliage(name)
+    }
+
+    /// Apply the foliage tint to a grey texture colour.
+    pub fn apply_foliage_tint(c: [u8; 3]) -> [u8; 3] {
+        crate::render::apply_foliage_tint(c)
+    }
 
     use std::path::{Path, PathBuf};
 
