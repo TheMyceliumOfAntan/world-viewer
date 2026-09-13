@@ -72,6 +72,16 @@ pub struct Section {
     pub data16: Option<Vec<u8>>,
     pub data: Option<Vec<u8>>,
     pub add: Option<Vec<u8>>,
+    /// 1.13+ flattened format: palette entry index per block, 4..16 bits each.
+    pub block_states: Option<BlockStates>,
+}
+
+/// 1.13+ `block_states`: a palette plus bit-packed indices.
+pub struct BlockStates {
+    pub palette: Vec<String>,
+    pub data: Option<Vec<u64>>,
+    /// Bits per entry, derived from palette length (per the wiki).
+    pub bits: u32,
 }
 
 impl Section {
@@ -116,6 +126,34 @@ impl Section {
         }
         (0, 0)
     }
+
+    /// Palette entry index for 1.13+ sections, or None for legacy formats.
+    pub fn palette_index(&self, x: usize, y: usize, z: usize) -> Option<usize> {
+        let bs = self.block_states.as_ref()?;
+        // 1.13+ block order is YZX
+        let i = (y * 16 + z) * 16 + x;
+        let Some(data) = &bs.data else {
+            // Single-entry palette: everything is palette[0].
+            return Some(0);
+        };
+        let bits = bs.bits as usize;
+        let per_long = 64 / bits;
+        let long_idx = i / per_long;
+        if long_idx >= data.len() {
+            return None;
+        }
+        let offset = (i % per_long) * bits;
+        let mask = (1u64 << bits) - 1;
+        let v = (data[long_idx] >> offset) & mask;
+        Some(v as usize)
+    }
+
+    /// Block name for 1.13+ sections.
+    pub fn block_name(&self, x: usize, y: usize, z: usize) -> Option<&str> {
+        let idx = self.palette_index(x, y, z)?;
+        let bs = self.block_states.as_ref()?;
+        bs.palette.get(idx).map(|s| s.as_str())
+    }
 }
 
 pub fn parse_sections(chunk_nbt: &[u8]) -> Result<Vec<Section>, String> {
@@ -138,11 +176,159 @@ pub fn parse_sections(chunk_nbt: &[u8]) -> Result<Vec<Section>, String> {
                 data16: get_bytes("Data16"),
                 data: get_bytes("Data"),
                 add: get_bytes("Add"),
+                block_states: None,
             });
         }
     }
     out.sort_by(|a, b| b.y.cmp(&a.y));
     Ok(out)
+}
+
+/// Targeted section parser for 1.13+ chunks (`sections[].block_states`).
+///
+/// Sections live at the root (not under `Level`), `Y` may be negative, and the
+/// palette is a list of compounds carrying a `Name` string.
+pub fn parse_sections_modern(chunk_nbt: &[u8]) -> Result<Vec<Section>, String> {
+    use nbt::Reader;
+
+    let mut r = Reader::new(chunk_nbt);
+    let root_type = r.u8()?;
+    if root_type != 10 {
+        return Err("chunk root is not a compound".into());
+    }
+    let _root_name = r.string()?;
+
+    let mut out: Vec<Section> = Vec::new();
+    loop {
+        let t = r.u8()?;
+        if t == 0 {
+            break;
+        }
+        let name = r.string()?;
+        if name == "sections" && t == 9 {
+            let elem = r.u8()?;
+            let count = r.i32()?;
+            if count < 0 {
+                return Err("negative section count".into());
+            }
+            for _ in 0..count {
+                if elem == 10 {
+                    out.push(parse_section_modern(&mut r)?);
+                } else {
+                    r.skip(elem, 1)?;
+                }
+            }
+        } else {
+            r.skip(t, 0)?;
+        }
+    }
+    out.sort_by(|a, b| b.y.cmp(&a.y));
+    Ok(out)
+}
+
+fn parse_section_modern(r: &mut nbt::Reader) -> Result<Section, String> {
+    let mut y = 0i32;
+    let mut block_states = None;
+
+    loop {
+        let t = r.u8()?;
+        if t == 0 {
+            break;
+        }
+        let name = r.string()?;
+        match (name.as_str(), t) {
+            ("Y", 1) => y = r.u8()? as i8 as i32,
+            ("Y", 3) => y = r.i32()?,
+            ("block_states", 10) => block_states = Some(parse_block_states(r)?),
+            _ => r.skip(t, 1)?,
+        }
+    }
+
+    Ok(Section {
+        y,
+        blocks16: None,
+        blocks: None,
+        data16: None,
+        data: None,
+        add: None,
+        block_states,
+    })
+}
+
+fn parse_block_states(r: &mut nbt::Reader) -> Result<BlockStates, String> {
+    let mut palette: Vec<String> = Vec::new();
+    let mut data: Option<Vec<u64>> = None;
+
+    loop {
+        let t = r.u8()?;
+        if t == 0 {
+            break;
+        }
+        let name = r.string()?;
+        match (name.as_str(), t) {
+            ("palette", 9) => {
+                let elem = r.u8()?;
+                let count = r.i32()?;
+                if count < 0 {
+                    return Err("negative palette len".into());
+                }
+                for _ in 0..count {
+                    if elem == 10 {
+                        palette.push(parse_palette_entry(r)?);
+                    } else {
+                        r.skip(elem, 2)?;
+                        palette.push(String::new());
+                    }
+                }
+            }
+            ("data", 12) => {
+                let n = r.i32()?;
+                if n < 0 {
+                    return Err("negative data len".into());
+                }
+                let mut v = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    v.push(r.u64()?);
+                }
+                data = Some(v);
+            }
+            _ => r.skip(t, 1)?,
+        }
+    }
+
+    // Bits per entry follows the wiki's rules for the flattened format.
+    let bits = match palette.len() {
+        0 | 1 => 0,
+        n if n <= 16 => 4,
+        n if n <= 32 => 5,
+        n if n <= 64 => 6,
+        n if n <= 128 => 7,
+        n if n <= 256 => 8,
+        _ => 9,
+    };
+
+    Ok(BlockStates {
+        palette,
+        data,
+        bits,
+    })
+}
+
+fn parse_palette_entry(r: &mut nbt::Reader) -> Result<String, String> {
+    let mut name = String::new();
+    loop {
+        let t = r.u8()?;
+        if t == 0 {
+            break;
+        }
+        let key = r.string()?;
+        if key == "Name" && t == 8 {
+            name = r.string()?;
+        } else {
+            r.skip(t, 2)?;
+        }
+    }
+    Ok(name)
 }
 
 /// Targeted section parser: walks the NBT tree and materialises *only* the
@@ -277,5 +463,6 @@ fn parse_section(r: &mut nbt::Reader) -> Result<Section, String> {
         data16,
         data,
         add,
+        block_states: None,
     })
 }

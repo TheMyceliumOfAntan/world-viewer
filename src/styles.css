@@ -168,6 +168,28 @@ body,
   border: 1px solid #000;
 }
 
+.sources {
+  margin-top: 8px;
+}
+
+.sources li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  padding: 3px 0;
+  cursor: default;
+}
+
+.srcname {
+  color: #9aa3b8;
+}
+
+.srcnum {
+  color: #dfe4f0;
+  font-variant-numeric: tabular-nums;
+}
+
 .mapwrap {
   flex: 1;
   position: relative;

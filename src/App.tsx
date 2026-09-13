@@ -21,6 +21,7 @@ type Waypoint = {
   dimension: number;
   color: string;
   kind: string;
+  source: string;
 };
 
 type Player = { x: number; y: number; z: number; dimension: number; name: string };
@@ -44,6 +45,33 @@ const DEFAULT_SAVE = "C:\\.minecraft\\versions\\GTNH 2.8.4\\saves\\新的世界 
 function tileUrl(dim: number, ymax: number) {
   const yPart = ymax >= 255 ? "4294967295" : String(ymax);
   return `http://tile.localhost/${dim}/{z}/{x}/{y}.png?ymax=${yPart}`;
+}
+
+/** Per-source waypoint counts for the current dimension. */
+function WaypointSources({ world, dim }: { world: WorldInfo; dim: number }) {
+  const counts = new Map<string, number>();
+  for (const w of world.waypoints) {
+    if (w.dimension !== dim) continue;
+    counts.set(w.source, (counts.get(w.source) ?? 0) + 1);
+  }
+  if (counts.size === 0) {
+    return <p className="hint">当前维度没有路径点</p>;
+  }
+  const label: Record<string, string> = {
+    journeymap: "JourneyMap",
+    xaero: "Xaero",
+    voxelmap: "VoxelMap",
+  };
+  return (
+    <ul className="sources">
+      {[...counts.entries()].map(([src, n]) => (
+        <li key={src}>
+          <span className="srcname">{label[src] ?? src}</span>
+          <span className="srcnum">{n}</span>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 export default function App() {
@@ -110,6 +138,11 @@ export default function App() {
       map.removeLayer(markersRef.current);
     }
     const group = L.layerGroup();
+    const sourceLabel: Record<string, string> = {
+      journeymap: "JourneyMap",
+      xaero: "Xaero",
+      voxelmap: "VoxelMap",
+    };
     for (const wp of world.waypoints.filter((w) => w.dimension === dimension)) {
       const marker = L.circleMarker([-wp.z, wp.x], {
         radius: 7,
@@ -118,8 +151,9 @@ export default function App() {
         fillColor: wp.color,
         fillOpacity: 0.95,
       });
+      const src = sourceLabel[wp.source] ?? wp.source;
       marker.bindPopup(
-        `<b>${wp.name}</b><br/>${wp.kind}<br/>X=${wp.x} Y=${wp.y} Z=${wp.z}`
+        `<b>${wp.name}</b><br/>${wp.kind} · ${src}<br/>X=${wp.x} Y=${wp.y} Z=${wp.z}`
       );
       marker.addTo(group);
     }
@@ -208,11 +242,18 @@ export default function App() {
   };
 
   useEffect(() => {
-    // no auto-load: avoid touching disk until user acts
+    // Support ?save=<path> so a world can be opened directly (and so the UI
+    // can be reloaded by automated tests without losing the loaded world).
+    const params = new URLSearchParams(window.location.search);
+    const save = params.get("save");
+    if (save) {
+      void loadWorld(save);
+    }
     return () => {
       mapRef.current?.remove();
       mapRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
@@ -279,9 +320,10 @@ export default function App() {
               <span className="dot player" /> 玩家最后位置
             </li>
             <li>
-              <span className="dot wp" /> JourneyMap 路径点
+              <span className="dot wp" /> 路径点（JourneyMap / Xaero / VoxelMap）
             </li>
           </ul>
+          {info && <WaypointSources world={info} dim={dim} />}
         </aside>
 
         <main className="mapwrap">

@@ -7,14 +7,32 @@ use crate::region;
 pub const TILE_SIZE: usize = 256;
 const EMPTY: i32 = i32::MIN;
 
-/// A fully parsed chunk: block ids/metas as two 16x16x16-per-section layers.
+/// A block reference, either a legacy numeric id+meta or a 1.13+ namespaced
+/// block name. Both resolve through `Palette`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BlockRef {
+    Legacy(u16, u16),
+    Named(String),
+}
+
+impl BlockRef {
+    pub fn is_air(&self) -> bool {
+        match self {
+            BlockRef::Legacy(id, _) => *id == 0,
+            BlockRef::Named(name) => name == "minecraft:air" || name == "minecraft:cave_air" || name == "minecraft:void_air",
+        }
+    }
+}
+
+/// A fully parsed chunk. Supports both the legacy (1.12-) and flattened
+/// (1.13+) section layouts.
 pub struct ChunkData {
     pub sections: Vec<region::Section>,
 }
 
 impl ChunkData {
-    /// Top-most non-air block at (x,z) with block-y <= ymax. Returns (id, meta, y).
-    pub fn top_block(&self, x: usize, z: usize, ymax: i32) -> Option<(u16, u16, i32)> {
+    /// Top-most non-air block at (x,z) with block-y <= ymax.
+    pub fn top_block(&self, x: usize, z: usize, ymax: i32) -> Option<(BlockRef, i32)> {
         for s in &self.sections {
             let base = s.y * 16;
             if base > ymax {
@@ -25,9 +43,17 @@ impl ChunkData {
                 if by > ymax {
                     continue;
                 }
-                let (id, meta) = s.block(x, y, z);
-                if id != 0 {
-                    return Some((id, meta, by));
+                let b = if s.block_states.is_some() {
+                    match s.block_name(x, y, z) {
+                        Some(n) => BlockRef::Named(n.to_string()),
+                        None => continue,
+                    }
+                } else {
+                    let (id, meta) = s.block(x, y, z);
+                    BlockRef::Legacy(id, meta)
+                };
+                if !b.is_air() {
+                    return Some((b, by));
                 }
             }
         }
@@ -35,7 +61,7 @@ impl ChunkData {
     }
 
     /// Highest non-air block at (x,z) below ymax that is not fully transparent.
-    pub fn top_visible(&self, x: usize, z: usize, ymax: i32) -> Option<(u16, u16, i32)> {
+    pub fn top_visible(&self, x: usize, z: usize, ymax: i32) -> Option<(BlockRef, i32)> {
         self.top_block(x, z, ymax)
     }
 }
@@ -43,7 +69,12 @@ impl ChunkData {
 pub fn load_chunk(region_dir: &Path, cx: i32, cz: i32) -> Result<Option<ChunkData>, String> {
     match region::read_chunk_nbt(region_dir, cx, cz)? {
         Some(nbt_bytes) => {
-            let sections = region::parse_sections_fast(&nbt_bytes)?;
+            // 1.13+ chunks keep sections at the root; older ones nest them
+            // under `Level`. Detect by peeking at the section parser output.
+            let sections = match region::parse_sections_fast(&nbt_bytes) {
+                Ok(s) if !s.is_empty() => s,
+                _ => region::parse_sections_modern(&nbt_bytes)?,
+            };
             Ok(Some(ChunkData { sections }))
         }
         None => Ok(None),
@@ -145,7 +176,7 @@ impl Surface {
             for cx in -1..=chunks_per_tile {
                 let ox = cx * 16;
                 let oz = cz * 16;
-                let mut hits: Vec<(i32, i32, u16, u16, i32)> = Vec::new();
+                let mut hits: Vec<(i32, i32, BlockRef, i32)> = Vec::new();
                 if let Some(Some(chunk)) = cache.chunks.get(&(chunk_x0 + cx, chunk_z0 + cz)) {
                     for lz in 0..16i32 {
                         for lx in 0..16i32 {
@@ -154,20 +185,26 @@ impl Surface {
                             if gx < -1 || gz < -1 || gx > lim || gz > lim {
                                 continue;
                             }
-                            if let Some((id, meta, y)) =
+                            if let Some((block, y)) =
                                 chunk.top_visible(lx as usize, lz as usize, ymax)
                             {
-                                hits.push((gx, gz, id, meta, y));
+                                hits.push((gx, gz, block, y));
                             }
                         }
                     }
                 }
-                for (gx, gz, id, meta, y) in hits {
-                    let (rgb, _src, _name) = cache.palette.color(id, meta);
+                for (gx, gz, block, y) in hits {
+                    let (rgb, _src, name) = cache.palette.color_ref(&block);
                     let mut c = rgb;
                     if tint {
-                        let name = cache.palette.name_of(id);
-                        if name == "minecraft:grass" || name == "minecraft:leaves" {
+                        // Approximate foliage tint; JourneyMap stores the grey
+                        // texture colour for grass/leaves, so apply the green.
+                        let base = name.split('[').next().unwrap_or(&name);
+                        if base == "minecraft:grass"
+                            || base == "minecraft:grass_block"
+                            || base.ends_with("_leaves")
+                            || base == "minecraft:leaves"
+                        {
                             c = [
                                 (c[0] as f32 * 0.55 + 60.0) as u8,
                                 (c[1] as f32 * 0.85 + 40.0) as u8,

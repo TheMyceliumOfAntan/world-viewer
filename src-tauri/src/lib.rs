@@ -178,7 +178,7 @@ fn tile_from_uri(state: &AppState, uri: &tauri::http::Uri) -> Result<(Vec<u8>, b
 /// Exposed for tests
 pub mod testing {
     pub use crate::palette::Palette;
-    pub use crate::render::ChunkData;
+    pub use crate::render::{BlockRef, ChunkData};
     pub use crate::world::World;
 
     use std::path::{Path, PathBuf};
@@ -213,6 +213,14 @@ pub mod testing {
     /// Targeted section parser used in production.
     pub fn parse_sections_fast(data: &[u8]) -> Result<Vec<crate::region::Section>, String> {
         crate::region::parse_sections_fast(data)
+    }
+
+    /// Load waypoints from all supported mods under an instance root.
+    pub fn load_waypoints(
+        instance_root: &Path,
+        save_name: &str,
+    ) -> Vec<crate::palette::Waypoint> {
+        crate::palette::load_waypoints(instance_root, save_name)
     }
 
     /// Render a single 256x256 tile the same way the tile:// protocol does.

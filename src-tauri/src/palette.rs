@@ -97,26 +97,46 @@ impl Palette {
         Ok(pal)
     }
 
+    /// Look up a colour for a block reference.
+    ///
+    /// Resolution order:
+    ///   1. JourneyMap palette, by block name (+ meta when legacy)
+    ///   2. built-in vanilla table, by block name
+    ///   3. fallback grey
+    pub fn color_ref(&self, b: &crate::render::BlockRef) -> ([u8; 3], &'static str, String) {
+        let (name, meta) = match b {
+            crate::render::BlockRef::Legacy(id, meta) => {
+                if *id == 0 {
+                    return (self.fallback, "air", String::new());
+                }
+                let name = self.name_of(*id);
+                (name, *meta)
+            }
+            crate::render::BlockRef::Named(n) => (n.clone(), 0u16),
+        };
+
+        if let Some(metas) = self.by_uid.get(name.as_str()) {
+            if let Some((rgb, disp)) = metas.get(&meta) {
+                return (*rgb, "exact", disp.clone());
+            }
+            if let Some((rgb, disp)) = metas.get(&0) {
+                return (*rgb, "meta0", disp.clone());
+            }
+            if let Some((rgb, disp)) = metas.values().next() {
+                return (*rgb, "first", disp.clone());
+            }
+        }
+
+        if let Some(rgb) = vanilla_color(&name) {
+            return (rgb, "vanilla", name);
+        }
+
+        (self.fallback, "unknown", name)
+    }
+
     /// Look up color by block id + meta. Returns (rgb, source, name).
     pub fn color(&self, id: u16, meta: u16) -> ([u8; 3], &'static str, String) {
-        if id == 0 {
-            return (self.fallback, "air", String::new());
-        }
-        if let Some(name) = self.block_names.get(&id) {
-            if let Some(metas) = self.by_uid.get(name.as_str()) {
-                if let Some((rgb, disp)) = metas.get(&meta) {
-                    return (*rgb, "exact", disp.clone());
-                }
-                if let Some((rgb, disp)) = metas.get(&0) {
-                    return (*rgb, "meta0", disp.clone());
-                }
-                if let Some((rgb, disp)) = metas.values().next() {
-                    return (*rgb, "first", disp.clone());
-                }
-            }
-            return (self.fallback, "unknown", name.clone());
-        }
-        (self.fallback, "unknown", format!("id:{}", id))
+        self.color_ref(&crate::render::BlockRef::Legacy(id, meta))
     }
 
     pub fn by_uid_len(&self) -> usize {
@@ -129,6 +149,180 @@ impl Palette {
             .cloned()
             .unwrap_or_else(|| format!("id:{}", id))
     }
+}
+
+/// Built-in colours for vanilla blocks, used when no JourneyMap palette is
+/// available (e.g. a vanilla or Xaero-only instance). Values approximate the
+/// average top-face colour of each block.
+fn vanilla_color(name: &str) -> Option<[u8; 3]> {
+    // Strip properties: "minecraft:oak_log[axis=y]" -> "minecraft:oak_log"
+    let base = name.split('[').next().unwrap_or(name);
+    let table: &[(&str, [u8; 3])] = &[
+        ("minecraft:stone", [125, 125, 125]),
+        ("minecraft:cobblestone", [122, 122, 122]),
+        ("minecraft:mossy_cobblestone", [105, 121, 91]),
+        ("minecraft:stone_bricks", [122, 121, 121]),
+        ("minecraft:deepslate", [87, 87, 89]),
+        ("minecraft:cobbled_deepslate", [77, 77, 80]),
+        ("minecraft:tuff", [108, 109, 102]),
+        ("minecraft:granite", [149, 103, 85]),
+        ("minecraft:diorite", [188, 188, 190]),
+        ("minecraft:andesite", [136, 136, 137]),
+        ("minecraft:dirt", [134, 96, 67]),
+        ("minecraft:coarse_dirt", [119, 85, 59]),
+        ("minecraft:rooted_dirt", [144, 104, 78]),
+        ("minecraft:grass_block", [125, 145, 78]),
+        ("minecraft:podzol", [91, 66, 30]),
+        ("minecraft:mycelium", [111, 99, 105]),
+        ("minecraft:farmland", [134, 96, 67]),
+        ("minecraft:dirt_path", [148, 122, 65]),
+        ("minecraft:sand", [219, 211, 160]),
+        ("minecraft:red_sand", [169, 88, 33]),
+        ("minecraft:sandstone", [218, 210, 158]),
+        ("minecraft:red_sandstone", [170, 90, 40]),
+        ("minecraft:gravel", [126, 124, 122]),
+        ("minecraft:clay", [158, 164, 176]),
+        ("minecraft:bedrock", [83, 83, 83]),
+        ("minecraft:obsidian", [20, 18, 29]),
+        ("minecraft:crying_obsidian", [32, 16, 60]),
+        ("minecraft:netherrack", [111, 54, 52]),
+        ("minecraft:soul_sand", [85, 66, 55]),
+        ("minecraft:soul_soil", [76, 58, 47]),
+        ("minecraft:basalt", [72, 72, 78]),
+        ("minecraft:blackstone", [42, 35, 40]),
+        ("minecraft:end_stone", [221, 223, 165]),
+        ("minecraft:purpur_block", [169, 125, 169]),
+        ("minecraft:water", [46, 67, 244]),
+        ("minecraft:lava", [216, 104, 26]),
+        ("minecraft:ice", [125, 173, 255]),
+        ("minecraft:packed_ice", [141, 180, 250]),
+        ("minecraft:blue_ice", [116, 167, 253]),
+        ("minecraft:snow_block", [239, 251, 251]),
+        ("minecraft:snow", [239, 251, 251]),
+        ("minecraft:powder_snow", [248, 253, 253]),
+        ("minecraft:glass", [218, 240, 244]),
+        ("minecraft:terracotta", [150, 92, 66]),
+        ("minecraft:white_terracotta", [209, 178, 161]),
+        ("minecraft:orange_terracotta", [161, 83, 37]),
+        ("minecraft:magenta_terracotta", [149, 88, 108]),
+        ("minecraft:light_blue_terracotta", [113, 108, 137]),
+        ("minecraft:yellow_terracotta", [186, 133, 35]),
+        ("minecraft:lime_terracotta", [103, 117, 52]),
+        ("minecraft:pink_terracotta", [161, 78, 78]),
+        ("minecraft:gray_terracotta", [57, 42, 35]),
+        ("minecraft:light_gray_terracotta", [135, 106, 97]),
+        ("minecraft:cyan_terracotta", [86, 91, 91]),
+        ("minecraft:purple_terracotta", [118, 70, 86]),
+        ("minecraft:blue_terracotta", [74, 59, 91]),
+        ("minecraft:brown_terracotta", [77, 51, 35]),
+        ("minecraft:green_terracotta", [76, 83, 42]),
+        ("minecraft:red_terracotta", [143, 61, 46]),
+        ("minecraft:black_terracotta", [37, 22, 16]),
+        ("minecraft:oak_log", [154, 125, 77]),
+        ("minecraft:spruce_log", [104, 81, 48]),
+        ("minecraft:birch_log", [184, 166, 121]),
+        ("minecraft:jungle_log", [153, 118, 73]),
+        ("minecraft:acacia_log", [103, 96, 86]),
+        ("minecraft:dark_oak_log", [60, 46, 26]),
+        ("minecraft:mangrove_log", [104, 60, 46]),
+        ("minecraft:cherry_log", [54, 40, 44]),
+        ("minecraft:oak_planks", [156, 127, 78]),
+        ("minecraft:spruce_planks", [103, 77, 46]),
+        ("minecraft:birch_planks", [195, 179, 123]),
+        ("minecraft:jungle_planks", [154, 110, 77]),
+        ("minecraft:acacia_planks", [168, 90, 50]),
+        ("minecraft:dark_oak_planks", [66, 43, 20]),
+        ("minecraft:oak_leaves", [72, 90, 36]),
+        ("minecraft:spruce_leaves", [44, 66, 50]),
+        ("minecraft:birch_leaves", [87, 116, 52]),
+        ("minecraft:jungle_leaves", [46, 87, 25]),
+        ("minecraft:acacia_leaves", [79, 104, 30]),
+        ("minecraft:dark_oak_leaves", [43, 76, 24]),
+        ("minecraft:cherry_leaves", [227, 155, 190]),
+        ("minecraft:azalea_leaves", [74, 108, 37]),
+        ("minecraft:mangrove_leaves", [62, 112, 49]),
+        ("minecraft:coal_ore", [115, 115, 115]),
+        ("minecraft:iron_ore", [135, 130, 126]),
+        ("minecraft:copper_ore", [124, 125, 120]),
+        ("minecraft:gold_ore", [143, 139, 124]),
+        ("minecraft:diamond_ore", [129, 140, 143]),
+        ("minecraft:emerald_ore", [118, 138, 122]),
+        ("minecraft:lapis_ore", [102, 112, 134]),
+        ("minecraft:redstone_ore", [132, 107, 107]),
+        ("minecraft:deepslate_coal_ore", [74, 74, 76]),
+        ("minecraft:deepslate_iron_ore", [104, 102, 102]),
+        ("minecraft:deepslate_copper_ore", [99, 99, 99]),
+        ("minecraft:deepslate_gold_ore", [115, 108, 95]),
+        ("minecraft:deepslate_diamond_ore", [93, 107, 108]),
+        ("minecraft:deepslate_emerald_ore", [89, 106, 91]),
+        ("minecraft:deepslate_lapis_ore", [75, 82, 105]),
+        ("minecraft:deepslate_redstone_ore", [97, 72, 72]),
+        ("minecraft:hay_block", [166, 141, 26]),
+        ("minecraft:bookshelf", [117, 98, 66]),
+        ("minecraft:crafting_table", [124, 86, 55]),
+        ("minecraft:furnace", [110, 110, 110]),
+        ("minecraft:chest", [146, 111, 55]),
+        ("minecraft:moss_block", [89, 109, 45]),
+        ("minecraft:sculk", [24, 35, 40]),
+        ("minecraft:calcite", [223, 224, 220]),
+        ("minecraft:dripstone_block", [134, 107, 92]),
+        ("minecraft:mud", [60, 57, 61]),
+        ("minecraft:packed_mud", [142, 106, 79]),
+        ("minecraft:nether_bricks", [44, 22, 26]),
+        ("minecraft:quartz_block", [235, 229, 222]),
+        ("minecraft:prismarine", [99, 156, 151]),
+        ("minecraft:dark_prismarine", [51, 91, 75]),
+        ("minecraft:sea_lantern", [172, 199, 190]),
+        ("minecraft:glowstone", [171, 131, 84]),
+        ("minecraft:sponge", [195, 192, 74]),
+        ("minecraft:wool", [233, 236, 236]),
+        ("minecraft:white_wool", [233, 236, 236]),
+        ("minecraft:orange_wool", [240, 118, 19]),
+        ("minecraft:magenta_wool", [189, 68, 179]),
+        ("minecraft:light_blue_wool", [58, 175, 217]),
+        ("minecraft:yellow_wool", [248, 198, 39]),
+        ("minecraft:lime_wool", [112, 185, 25]),
+        ("minecraft:pink_wool", [237, 141, 172]),
+        ("minecraft:gray_wool", [62, 68, 71]),
+        ("minecraft:light_gray_wool", [142, 142, 134]),
+        ("minecraft:cyan_wool", [21, 137, 145]),
+        ("minecraft:purple_wool", [121, 42, 172]),
+        ("minecraft:blue_wool", [53, 57, 157]),
+        ("minecraft:brown_wool", [114, 71, 40]),
+        ("minecraft:green_wool", [84, 109, 27]),
+        ("minecraft:red_wool", [161, 39, 34]),
+        ("minecraft:black_wool", [20, 21, 25]),
+    ];
+    table
+        .iter()
+        .find(|(k, _)| *k == base)
+        .map(|(_, v)| *v)
+        .or_else(|| {
+            // Name-based fallbacks so unknown variants still look sane.
+            if base.ends_with("_leaves") {
+                Some([72, 90, 36])
+            } else if base.ends_with("_log") || base.ends_with("_wood") {
+                Some([120, 95, 60])
+            } else if base.ends_with("_planks") {
+                Some([156, 127, 78])
+            } else if base.ends_with("_ore") {
+                Some([125, 125, 125])
+            } else if base.contains("water") {
+                Some([46, 67, 244])
+            } else if base.contains("lava") {
+                Some([216, 104, 26])
+            } else if base.contains("glass") {
+                Some([218, 240, 244])
+            } else if base.ends_with("_concrete") {
+                Some([150, 150, 150])
+            } else if base.ends_with("_terracotta") {
+                Some([150, 92, 66])
+            } else if base.contains("slab") || base.contains("stairs") {
+                Some([125, 125, 125])
+            } else {
+                None
+            }
+        })
 }
 
 fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>, String> {
@@ -151,9 +345,25 @@ pub struct Waypoint {
     pub dimension: i32,
     pub color: String,
     pub kind: String,
+    /// Which mod the waypoint came from: "journeymap" | "xaero" | "voxelmap".
+    pub source: String,
 }
 
+/// Load waypoints from every supported mod found under `instance_root`.
+///
+/// Supported layouts:
+///   journeymap/data/sp/<world>/waypoints/*.json
+///   xaero/minimap/<world>/dim%<id>/*.txt        (and xaero/world-map/...)
+///   voxelmap/<world>.points                     (multi-dimension, `#`-separated)
 pub fn load_waypoints(instance_root: &Path, save_name: &str) -> Vec<Waypoint> {
+    let mut out = Vec::new();
+    out.extend(load_journeymap_waypoints(instance_root, save_name));
+    out.extend(load_xaero_waypoints(instance_root));
+    out.extend(load_voxelmap_waypoints(instance_root, save_name));
+    out
+}
+
+fn load_journeymap_waypoints(instance_root: &Path, save_name: &str) -> Vec<Waypoint> {
     let dir: PathBuf = instance_root
         .join("journeymap")
         .join("data")
@@ -210,7 +420,214 @@ pub fn load_waypoints(instance_root: &Path, save_name: &str) -> Vec<Waypoint> {
                     .and_then(|t| t.as_str())
                     .unwrap_or("Normal")
                     .to_string(),
+                source: "journeymap".to_string(),
             });
+        }
+    }
+    out
+}
+
+/// Xaero's minimap / world map.
+///
+/// Layout: `xaero/minimap/<world>/dim%<id>/<any>.txt`, one waypoint per line:
+///   `waypoint:name:initials:x:y:z:color:disabled:type:set:...`
+/// Dimension comes from the directory name (`dim%0`, `dim%-1`, `dim%1`).
+/// Both `minimap` and `world-map` trees are scanned; duplicates are removed.
+fn load_xaero_waypoints(instance_root: &Path) -> Vec<Waypoint> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for tree in ["minimap", "world-map"] {
+        let root = instance_root.join("xaero").join(tree);
+        let worlds = match std::fs::read_dir(&root) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for world in worlds.flatten() {
+            if !world.path().is_dir() {
+                continue;
+            }
+            let dims = match std::fs::read_dir(world.path()) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for dim_entry in dims.flatten() {
+                let dim_name = dim_entry.file_name().to_string_lossy().into_owned();
+                let dim: i32 = match dim_name.strip_prefix("dim%") {
+                    Some(rest) => match rest.parse::<i32>() {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    },
+                    // world-map uses "DIM-1"/"DIM1"/"null" (null = overworld)
+                    None => match dim_name.as_str() {
+                        "DIM-1" => -1,
+                        "DIM1" => 1,
+                        "null" => 0,
+                        _ => continue,
+                    },
+                };
+                let files = match std::fs::read_dir(dim_entry.path()) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                for file in files.flatten() {
+                    let path = file.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("txt") {
+                        continue;
+                    }
+                    let text = match std::fs::read_to_string(&path) {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    };
+                    for line in text.lines() {
+                        let line = line.trim();
+                        if !line.starts_with("waypoint:") {
+                            continue;
+                        }
+                        let f: Vec<&str> = line.split(':').collect();
+                        // waypoint:name:initials:x:y:z:color:disabled:type:set:...
+                        if f.len() < 9 {
+                            continue;
+                        }
+                        let name = f[1];
+                        // Xaero uses i18n keys for built-in points.
+                        let name = match name {
+                            "gui.xaero_deathpoint" | "gui.xaero_deathpoint_old" => "死亡点",
+                            "gui.xaero_manual" => "标记",
+                            _ => name,
+                        };
+                        let (Ok(x), Ok(y), Ok(z)) =
+                            (f[3].parse::<i32>(), f[4].parse::<i32>(), f[5].parse::<i32>())
+                        else {
+                            continue;
+                        };
+                        let color_idx: u32 = f[6].parse().unwrap_or(0);
+                        let disabled = f[7].eq_ignore_ascii_case("true");
+                        if disabled {
+                            continue;
+                        }
+                        let kind = match f[8] {
+                            "1" => "Death",
+                            "2" => "OldDeath",
+                            _ => "Normal",
+                        };
+                        let key = (name.to_string(), x, y, z, dim);
+                        if !seen.insert(key) {
+                            continue;
+                        }
+                        out.push(Waypoint {
+                            name: name.to_string(),
+                            x,
+                            y,
+                            z,
+                            dimension: dim,
+                            color: xaero_color(color_idx),
+                            kind: kind.to_string(),
+                            source: "xaero".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Xaero stores a palette index, not an RGB triple.
+fn xaero_color(idx: u32) -> String {
+    const PALETTE: [&str; 16] = [
+        "#ff3b30", "#ff9500", "#ffcc00", "#4cd964", "#5ac8fa", "#007aff", "#5856d6", "#af52de",
+        "#ff2d55", "#a2845e", "#8e8e93", "#c7c7cc", "#ffffff", "#000000", "#34c759", "#ff375f",
+    ];
+    PALETTE[(idx as usize) % PALETTE.len()].to_string()
+}
+
+/// VoxelMap `.points` file.
+///
+/// Layout: `<world>.points`, one record per line:
+///   `name:<n>,x:<x>,z:<z>,y:<y>,enabled:<b>,red:<r>,green:<g>,blue:<b>,...,dimensions:<ids>#`
+/// `dimensions` holds `#`-separated dimension ids.
+fn load_voxelmap_waypoints(instance_root: &Path, save_name: &str) -> Vec<Waypoint> {
+    let mut out = Vec::new();
+    let dir = instance_root.join("voxelmap");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return out,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("points") {
+            continue;
+        }
+        // Prefer the file matching this world, but accept any if it is the only one.
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if !save_name.is_empty() && stem != save_name {
+            continue;
+        }
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || !line.contains("name:") {
+                continue;
+            }
+            let mut name = String::new();
+            let mut x = 0i32;
+            let mut y = 64i32;
+            let mut z = 0i32;
+            let mut r = 0f32;
+            let mut g = 1f32;
+            let mut b = 0f32;
+            let mut enabled = true;
+            let mut dims: Vec<i32> = Vec::new();
+            for field in line.split(',') {
+                let Some((k, v)) = field.split_once(':') else {
+                    continue;
+                };
+                match k {
+                    "name" => name = v.to_string(),
+                    "x" => x = v.parse().unwrap_or(0),
+                    "y" => y = v.parse().unwrap_or(64),
+                    "z" => z = v.parse().unwrap_or(0),
+                    "red" => r = v.parse().unwrap_or(0.0),
+                    "green" => g = v.parse().unwrap_or(1.0),
+                    "blue" => b = v.parse().unwrap_or(0.0),
+                    "enabled" => enabled = v.eq_ignore_ascii_case("true"),
+                    "dimensions" => {
+                        dims = v
+                            .trim_end_matches('#')
+                            .split('#')
+                            .filter_map(|d| d.trim().parse::<i32>().ok())
+                            .collect();
+                    }
+                    _ => {}
+                }
+            }
+            if !enabled || name.is_empty() {
+                continue;
+            }
+            if dims.is_empty() {
+                dims.push(0);
+            }
+            let to_byte = |f: f32| (f.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let color = format!("#{:02x}{:02x}{:02x}", to_byte(r), to_byte(g), to_byte(b));
+            for dim in dims {
+                out.push(Waypoint {
+                    name: name.clone(),
+                    x,
+                    y,
+                    z,
+                    dimension: dim,
+                    color: color.clone(),
+                    kind: "Normal".to_string(),
+                    source: "voxelmap".to_string(),
+                });
+            }
         }
     }
     out

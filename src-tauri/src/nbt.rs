@@ -117,6 +117,14 @@ impl<'a> Reader<'a> {
         Ok(v)
     }
 
+    pub fn u64(&mut self) -> Result<u64, String> {
+        self.need(8)?;
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&self.buf[self.pos..self.pos + 8]);
+        self.pos += 8;
+        Ok(u64::from_be_bytes(b))
+    }
+
     fn i64(&mut self) -> Result<i64, String> {
         self.need(8)?;
         let mut b = [0u8; 8];
