@@ -57,6 +57,7 @@
   save_dir: string;             // 存档绝对路径
   save_name: string;            // 存档名（来自 level.dat LevelName）
   level_name: string;           // 同上（历史字段，保留兼容）
+  world_seed: string;           // 世界种子，空串表示无法读取
   instance_root: string;        // 实例根目录（向上探测到的含 journeymap/ 或 mods/ 的目录）
   dimensions: DimensionInfo[];  // 有 region 数据的维度，按 id 升序
   player: PlayerInfo | null;    // 玩家最后位置
@@ -65,6 +66,12 @@
   palette_mapped_blocks: number;// 有名称映射的方块数
 }
 ```
+
+#### `world_seed` 为什么是字符串
+
+`world::read_world_seed()` 读取 `level.dat` 的 `Data.WorldGenSettings.seed`（1.16+），回退到旧版 `Data.RandomSeed`，两者都缺失时返回空串。
+
+**必须以字符串跨 IPC 传递**：Minecraft 种子是 `i64`，范围可达 ±2^63，超过 JS `Number.MAX_SAFE_INTEGER`（2^53-1）。若以数字序列化，前端会静默丢失低位精度，显示的种子与真实值不符。后端在 Rust 侧 `to_string()`，前端按字符串原样展示。
 
 ### 2.2 `DimensionInfo`
 
@@ -179,7 +186,7 @@ http://tile.localhost/{worldKey}/{dim}/{z}/{x}/{y}.png?ymax=N
 
 | 方法 | 说明 |
 |------|------|
-| `setUrlTemplate(template)` | 设置 URL 模板；变化时清空失败记录与空标记并 `redraw()` |
+| `setUrlTemplate(template)` | 设置 URL 模板；变化时清空失败记录、空标记、待执行队列与等待回调，然后 `redraw()` |
 | `getUrlTemplate()` | 返回当前模板（用于判断是否需要清缓存） |
 | `clearCache()` | 清空图片缓存、等待队列、失败记录、空标记 |
 | `stats()` | 返回 `{cached, waiting, queued, active, failed, empty}`，供诊断 |
@@ -188,6 +195,7 @@ http://tile.localhost/{worldKey}/{dim}/{z}/{x}/{y}.png?ymax=N
 
 1. 同一瓦片的并发请求必须**共享回调**而非丢弃。Leaflet 在缩放/平移时会重建瓦片元素并重复请求同一坐标；若第二次请求的回调被丢弃，该瓦片将永久空白。
 2. 切换存档时必须清空缓存。模板含 `worldKey`，因此比较模板即可检出世界变化；`loadWorld` 另有显式 `clearCache()` 兜底。
+3. **模板变化时必须同时清空 `queue` 与 `waiting`**。`queue` 中存的是旧模板 URL 的闭包，失效后继续执行会浪费带宽并阻塞新请求；`waiting` 是这些任务的回调登记表，只清队列会让回调成为孤儿——若用户拖回同一 ymax，该 key 命中 `waiting` 分支被追加而非重新请求，瓦片永久空白。二者必须成对清理。高度滑块每次 `onChange` 都触发模板变化，是这条不变量最常被踩到的入口。
 
 ## 5. 相关文档
 
@@ -200,3 +208,5 @@ http://tile.localhost/{worldKey}/{dim}/{z}/{x}/{y}.png?ymax=N
 ## 修订记录
 | 日期 | 版本 | 修改内容 | 修改人 |
 | 2026-09-14 | v1.0 | 初版创建 | AI Agent |
+| 2026-09-15 | v1.1 | WorldInfo 新增 world_seed（字符串，防 i64 精度丢失）；前端瓦片层契约补充模板切换须成对清空 queue/waiting | AI Agent |
+
