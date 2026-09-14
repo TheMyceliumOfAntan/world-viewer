@@ -154,6 +154,24 @@ impl Section {
         let bs = self.block_states.as_ref()?;
         bs.palette.get(idx).map(|s| s.as_str())
     }
+
+    /// Borrowed block reference for hot paths: no allocation.
+    /// Returns the legacy id/meta pair, or the palette's block name.
+    #[inline]
+    pub fn block_ref(
+        &self,
+        x: usize,
+        y: usize,
+        z: usize,
+    ) -> Option<crate::render::BlockRefRef<'_>> {
+        if let Some(bs) = &self.block_states {
+            let idx = self.palette_index(x, y, z)?;
+            let name = bs.palette.get(idx)?.as_str();
+            return Some(crate::render::BlockRefRef::Named(name));
+        }
+        let (id, meta) = self.block(x, y, z);
+        Some(crate::render::BlockRefRef::Legacy(id, meta))
+    }
 }
 
 pub fn parse_sections(chunk_nbt: &[u8]) -> Result<Vec<Section>, String> {

@@ -19,7 +19,39 @@ impl BlockRef {
     pub fn is_air(&self) -> bool {
         match self {
             BlockRef::Legacy(id, _) => *id == 0,
-            BlockRef::Named(name) => name == "minecraft:air" || name == "minecraft:cave_air" || name == "minecraft:void_air",
+            BlockRef::Named(name) => is_air_name(name),
+        }
+    }
+}
+
+/// Air block ids used by 1.13+ chunks.
+#[inline]
+pub fn is_air_name(name: &str) -> bool {
+    name == "minecraft:air" || name == "minecraft:cave_air" || name == "minecraft:void_air"
+}
+
+/// A borrowed block reference, used on hot paths to avoid allocating a
+/// `String` for every block inspected while scanning a column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockRefRef<'a> {
+    Legacy(u16, u16),
+    Named(&'a str),
+}
+
+impl<'a> BlockRefRef<'a> {
+    #[inline]
+    pub fn is_air(&self) -> bool {
+        match self {
+            BlockRefRef::Legacy(id, _) => *id == 0,
+            BlockRefRef::Named(name) => is_air_name(name),
+        }
+    }
+
+    /// Take ownership, allocating only for the named variant.
+    pub fn to_owned_ref(self) -> BlockRef {
+        match self {
+            BlockRefRef::Legacy(id, meta) => BlockRef::Legacy(id, meta),
+            BlockRefRef::Named(name) => BlockRef::Named(name.to_string()),
         }
     }
 }
@@ -28,29 +60,46 @@ impl BlockRef {
 /// (1.13+) section layouts.
 pub struct ChunkData {
     pub sections: Vec<region::Section>,
+    /// Per section, the highest local y (0..16) that holds a non-air block,
+    /// or `None` when the section is entirely air. Computed once at load time
+    /// so column scans can skip empty sections immediately.
+    ///
+    /// This matters a lot for 1.13+ chunks: a 1.20 overworld chunk has 24
+    /// sections spanning y=-64..320, of which ~15 are empty air.
+    section_top: Vec<Option<u8>>,
 }
 
 impl ChunkData {
+    pub fn new(sections: Vec<region::Section>) -> Self {
+        let section_top = sections.iter().map(section_highest_non_air).collect();
+        ChunkData {
+            sections,
+            section_top,
+        }
+    }
+
     /// Top-most non-air block at (x,z) with block-y <= ymax.
-    pub fn top_block(&self, x: usize, z: usize, ymax: i32) -> Option<(BlockRef, i32)> {
-        for s in &self.sections {
+    ///
+    /// Hot path: no allocation until a block is actually found. Callers that
+    /// need an owned `BlockRef` pay for exactly one allocation per column
+    /// instead of one per inspected block.
+    pub fn top_block_ref(&self, x: usize, z: usize, ymax: i32) -> Option<(BlockRefRef<'_>, i32)> {
+        for (s, top) in self.sections.iter().zip(self.section_top.iter()) {
             let base = s.y * 16;
             if base > ymax {
                 continue;
             }
-            for y in (0..16).rev() {
-                let by = base + y as i32;
+            // Skip sections with nothing in them (the common case above ground).
+            let Some(top_local) = *top else { continue };
+            let start = (top_local as i32).min(15);
+            for y in (0..=start).rev() {
+                let by = base + y;
                 if by > ymax {
                     continue;
                 }
-                let b = if s.block_states.is_some() {
-                    match s.block_name(x, y, z) {
-                        Some(n) => BlockRef::Named(n.to_string()),
-                        None => continue,
-                    }
-                } else {
-                    let (id, meta) = s.block(x, y, z);
-                    BlockRef::Legacy(id, meta)
+                let b = match s.block_ref(x, y as usize, z) {
+                    Some(b) => b,
+                    None => continue,
                 };
                 if !b.is_air() {
                     return Some((b, by));
@@ -60,10 +109,35 @@ impl ChunkData {
         None
     }
 
+    /// Owning convenience wrapper around [`top_block_ref`].
+    pub fn top_block(&self, x: usize, z: usize, ymax: i32) -> Option<(BlockRef, i32)> {
+        self.top_block_ref(x, z, ymax)
+            .map(|(b, y)| (b.to_owned_ref(), y))
+    }
+
     /// Highest non-air block at (x,z) below ymax that is not fully transparent.
     pub fn top_visible(&self, x: usize, z: usize, ymax: i32) -> Option<(BlockRef, i32)> {
         self.top_block(x, z, ymax)
     }
+}
+
+/// Highest local y (0..16) containing a non-air block, or `None` if the
+/// section is entirely air.
+fn section_highest_non_air(s: &region::Section) -> Option<u8> {
+    for y in (0..16usize).rev() {
+        for z in 0..16usize {
+            for x in 0..16usize {
+                let is_air = match s.block_ref(x, y, z) {
+                    Some(b) => b.is_air(),
+                    None => true,
+                };
+                if !is_air {
+                    return Some(y as u8);
+                }
+            }
+        }
+    }
+    None
 }
 
 pub fn load_chunk(region_dir: &Path, cx: i32, cz: i32) -> Result<Option<ChunkData>, String> {
@@ -75,7 +149,7 @@ pub fn load_chunk(region_dir: &Path, cx: i32, cz: i32) -> Result<Option<ChunkDat
                 Ok(s) if !s.is_empty() => s,
                 _ => region::parse_sections_modern(&nbt_bytes)?,
             };
-            Ok(Some(ChunkData { sections }))
+            Ok(Some(ChunkData::new(sections)))
         }
         None => Ok(None),
     }
