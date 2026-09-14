@@ -18,6 +18,7 @@ pub struct WorldInfo {
     pub save_dir: String,
     pub save_name: String,
     pub level_name: String,
+    pub world_seed: String,
     pub instance_root: String,
     pub dimensions: Vec<DimensionInfo>,
     pub player: Option<PlayerInfo>,
@@ -259,12 +260,30 @@ pub fn read_level_name(level_dat: &Path) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+pub fn read_world_seed(level_dat: &Path) -> Option<String> {
+    let bytes = std::fs::read(level_dat).ok()?;
+    let mut out = Vec::new();
+    {
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+        GzDecoder::new(&bytes[..]).read_to_end(&mut out).ok()?;
+    }
+    let (_, root) = nbt::parse(&out).ok()?;
+    let data = root.get("Data")?;
+    data.get("WorldGenSettings")
+        .and_then(|w| w.get("seed"))
+        .and_then(|s| s.as_i64())
+        .or_else(|| data.get("RandomSeed").and_then(|s| s.as_i64()))
+        .map(|v| v.to_string())
+}
+
 impl World {
     pub fn info(&self) -> WorldInfo {
         WorldInfo {
             save_dir: self.save_dir.to_string_lossy().into_owned(),
             save_name: read_level_name(&self.level_dat).unwrap_or_default(),
             level_name: read_level_name(&self.level_dat).unwrap_or_default(),
+            world_seed: read_world_seed(&self.level_dat).unwrap_or_default(),
             instance_root: self.instance_root.to_string_lossy().into_owned(),
             dimensions: self.dimensions.clone(),
             player: self.player.clone(),

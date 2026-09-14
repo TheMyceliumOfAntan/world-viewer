@@ -42,6 +42,16 @@ impl Tag {
         }
     }
 
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Tag::Byte(v) => Some(*v as i64),
+            Tag::Short(v) => Some(*v as i64),
+            Tag::Int(v) => Some(*v as i64),
+            Tag::Long(v) => Some(*v),
+            _ => None,
+        }
+    }
+
     pub fn as_list(&self) -> Option<&[Tag]> {
         match self {
             Tag::List(v) => Some(v),

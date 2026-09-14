@@ -30,6 +30,7 @@ type WorldInfo = {
   save_dir: string;
   save_name: string;
   level_name: string;
+  world_seed: string;
   instance_root: string;
   dimensions: Dimension[];
   player: Player | null;
@@ -359,6 +360,7 @@ export default function App() {
         <span>坐标: {mouse ? `X=${mouse.x} Z=${mouse.z}` : "—"}</span>
         <span>维度: {info?.dimensions.find((d) => d.id === dim)?.name ?? "—"}</span>
         <span>层: {ymax === 255 ? "全高" : `Y ≤ ${ymax}`}</span>
+        <span>种子: {info?.world_seed || "—"}</span>
         <span>{info ? `存档: ${info.save_name}` : ""}</span>
       </footer>
     </div>
