@@ -101,18 +101,22 @@ pub fn open_world(save_dir: &Path, instance_root_override: Option<PathBuf>) -> R
     });
 
     let mut dimensions = Vec::new();
-    // Overworld
+    // Overworld (legacy layout: <save>/region).
+    // Only listed when it actually has chunks; 26.1+ saves keep the overworld
+    // under dimensions/minecraft/overworld/ instead.
     let (files, chunks) = count_regions(&save_dir.join("region"));
-    dimensions.push(DimensionInfo {
-        id: 0,
-        name: palette::dimension_name(0, &instance_root.join("config"))
-            .unwrap_or_else(|| "主世界".into()),
-        region_dir: save_dir.join("region").to_string_lossy().into_owned(),
-        chunk_count: chunks,
-        has_data: files > 0,
-    });
+    if files > 0 {
+        dimensions.push(DimensionInfo {
+            id: 0,
+            name: palette::dimension_name(0, &instance_root.join("config"))
+                .unwrap_or_else(|| "主世界".into()),
+            region_dir: save_dir.join("region").to_string_lossy().into_owned(),
+            chunk_count: chunks,
+            has_data: true,
+        });
+    }
 
-    // DIM* dirs
+    // DIM* dirs (1.7 - 1.21)
     let mut dim_ids: Vec<i32> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(save_dir) {
         for e in entries.flatten() {
@@ -141,6 +145,13 @@ pub fn open_world(save_dir: &Path, instance_root_override: Option<PathBuf>) -> R
         });
     }
 
+    // dimensions/<namespace>/<name>/region (26.1+)
+    //
+    // From 26.1 snapshot 6 every dimension lives under a namespace folder;
+    // the overworld is no longer `region/` and the nether/end are no longer
+    // `DIM-1/`/`DIM1/`.
+    scan_namespaced_dimensions(save_dir, &instance_root, &mut dimensions);
+
     let waypoints = palette::load_waypoints(&instance_root, &save_name);
     let player = palette::load_player(&level_dat);
 
@@ -153,6 +164,84 @@ pub fn open_world(save_dir: &Path, instance_root_override: Option<PathBuf>) -> R
         waypoints,
         player,
     })
+}
+
+/// Scan the 26.1+ `dimensions/<namespace>/<name>/region` layout.
+///
+/// Dimension ids are not stored on disk in this layout, so the three vanilla
+/// dimensions are mapped to their conventional ids and any other dimension
+/// gets a stable id derived from its name (negative, to avoid clashing with
+/// the vanilla ids and with legacy `DIM<n>` folders).
+fn scan_namespaced_dimensions(
+    save_dir: &Path,
+    instance_root: &Path,
+    dimensions: &mut Vec<DimensionInfo>,
+) {
+    let root = save_dir.join("dimensions");
+    let Ok(namespaces) = std::fs::read_dir(&root) else {
+        return;
+    };
+    let mut found: Vec<(i32, String, PathBuf, u32, u32)> = Vec::new();
+
+    for ns_entry in namespaces.flatten() {
+        if !ns_entry.path().is_dir() {
+            continue;
+        }
+        let ns = ns_entry.file_name().to_string_lossy().into_owned();
+        let Ok(names) = std::fs::read_dir(ns_entry.path()) else {
+            continue;
+        };
+        for name_entry in names.flatten() {
+            if !name_entry.path().is_dir() {
+                continue;
+            }
+            let name = name_entry.file_name().to_string_lossy().into_owned();
+            let region_dir = name_entry.path().join("region");
+            let (files, chunks) = count_regions(&region_dir);
+            if files == 0 {
+                continue;
+            }
+            let full = format!("{}:{}", ns, name);
+            let id = match full.as_str() {
+                "minecraft:overworld" => 0,
+                "minecraft:the_nether" => -1,
+                "minecraft:the_end" => 1,
+                _ => stable_dimension_id(&full),
+            };
+            found.push((id, full, region_dir, files, chunks));
+        }
+    }
+
+    found.sort_by_key(|(id, _, _, _, _)| *id);
+    for (id, full, region_dir, _files, chunks) in found {
+        // Skip anything already listed (a converted save may have both
+        // layouts, and the legacy scan runs first).
+        if dimensions.iter().any(|d| d.id == id && d.has_data) {
+            continue;
+        }
+        let name = palette::dimension_name(id, &instance_root.join("config"))
+            .unwrap_or_else(|| full.clone());
+        dimensions.push(DimensionInfo {
+            id,
+            name,
+            region_dir: region_dir.to_string_lossy().into_owned(),
+            chunk_count: chunks,
+            has_data: true,
+        });
+    }
+}
+
+/// Deterministic id for a namespaced dimension, derived from its name.
+/// Returned in a negative range so it cannot collide with vanilla ids or
+/// legacy `DIM<n>` folders (which are >= 0).
+fn stable_dimension_id(name: &str) -> i32 {
+    let mut h: u32 = 2166136261;
+    for b in name.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(16777619);
+    }
+    // Map into -2_000_000..=-1_000_001 to stay clear of -1 (nether).
+    -1_000_001 - (h % 1_000_000) as i32
 }
 
 pub fn read_level_name(level_dat: &Path) -> Option<String> {

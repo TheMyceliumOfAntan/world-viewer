@@ -22,6 +22,10 @@ fn saves() -> Vec<(&'static str, PathBuf)> {
             "1.12.2 (vanilla)",
             PathBuf::from(r"C:\.minecraft\versions\1.12.2\saves\新的世界"),
         ),
+        (
+            "26.2 (dimensions/<ns>/<name>)",
+            PathBuf::from(r"C:\.minecraft\versions\26.2\saves\新的世界"),
+        ),
     ]
 }
 
