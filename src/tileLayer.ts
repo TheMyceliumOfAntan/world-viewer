@@ -183,24 +183,33 @@ export class CachedTileLayer extends L.GridLayer {
       }
     }
 
+    // Leaflet's GridLayer stores `this._tiles[key]` only *after* createTile
+    // returns. When the tile is already cached, load() invokes this callback
+    // synchronously, so done() would run before that store; _tileReady then
+    // fails its `this._tiles[key]` lookup and never adds
+    // 'leaflet-tile-loaded', leaving the tile visibility:hidden forever (the
+    // map goes black after zooming out onto cached tiles). Defer one task so
+    // the lookup succeeds.
     this.load(key, this.urlFor(coords), (img) => {
-      if (!img) {
-        // Leave whatever the parent fallback drew (possibly nothing) and let
-        // Leaflet know the request settled so it does not wait forever.
+      setTimeout(() => {
+        if (!img) {
+          // Leave whatever the parent fallback drew (possibly nothing) and let
+          // Leaflet know the request settled so it does not wait forever.
+          done(undefined, canvas);
+          return;
+        }
+        ctx.imageSmoothingEnabled = false;
+        ctx.clearRect(0, 0, size.x, size.y);
+        if (img.isEmpty) {
+          // The area exists on the map but was never generated in this save.
+          // Mark it so it is not confused with a tile that is still loading.
+          this.drawEmptyPattern(ctx, size);
+        } else {
+          ctx.drawImage(img.bitmap, 0, 0, size.x, size.y);
+        }
+        canvas.style.opacity = "1";
         done(undefined, canvas);
-        return;
-      }
-      ctx.imageSmoothingEnabled = false;
-      ctx.clearRect(0, 0, size.x, size.y);
-      if (img.isEmpty) {
-        // The area exists on the map but was never generated in this save.
-        // Mark it so it is not confused with a tile that is still loading.
-        this.drawEmptyPattern(ctx, size);
-      } else {
-        ctx.drawImage(img.bitmap, 0, 0, size.x, size.y);
-      }
-      canvas.style.opacity = "1";
-      done(undefined, canvas);
+      }, 0);
     });
 
     return canvas;
