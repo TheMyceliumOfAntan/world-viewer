@@ -41,6 +41,16 @@ export class CachedTileLayer extends L.GridLayer {
     this.urlTemplate = template;
     this.failures.clear();
     this.empty.clear();
+    // Queued jobs captured the old template's URLs, and redraw() is about to
+    // remove every tile element that was waiting on them. Dropping the jobs
+    // without dropping their waiters would strand callbacks whose key can be
+    // hit again if the user returns to the same height, leaving those tiles
+    // permanently blank. Dragging the height slider fires many template
+    // changes, so keeping the jobs would also stack thousands of stale
+    // requests ahead of the current ones and leave the map black for tens of
+    // seconds until the backlog drains.
+    this.queue.length = 0;
+    this.waiting.clear();
     this.redraw();
   }
 
