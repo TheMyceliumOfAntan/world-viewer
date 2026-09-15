@@ -77,6 +77,73 @@ fn pick_save_folder() -> Option<String> {
     None // handled on frontend via dialog plugin
 }
 
+#[derive(serde::Serialize)]
+struct BlockInfo {
+    /// Block-y of the top-most non-air block, or None when the column is empty.
+    y: Option<i32>,
+    /// Human-readable name (JourneyMap display name when known).
+    name: Option<String>,
+    /// Raw block identifier: `name` or `id:meta` for legacy chunks.
+    id: Option<String>,
+}
+
+/// Inspect the top-most non-air block of one world column, for the status bar.
+///
+/// The map is a 2D CRS.Simple plane, so block-y is not derivable on the
+/// frontend; it has to come from the same column scan the renderer uses.
+#[tauri::command]
+fn probe_block(
+    dim: i32,
+    x: i32,
+    z: i32,
+    ymax_u: u32,
+    state: State<AppState>,
+) -> Result<BlockInfo, String> {
+    use render::BlockRef;
+
+    let ymax = if ymax_u == u32::MAX {
+        255
+    } else {
+        ymax_u.min(255) as i32
+    };
+
+    let world_guard = state.world.lock().unwrap();
+    let world = world_guard.as_ref().ok_or("未加载世界")?;
+    let dim_info = world.dimension(dim).ok_or("维度不存在")?;
+    let region_dir = PathBuf::from(&dim_info.region_dir);
+
+    let mut cache_guard = state.cache.lock().unwrap();
+    let cache = cache_guard.as_mut().ok_or("缓存未初始化")?;
+
+    // Reuse the renderer's chunk cache: the column almost always falls inside
+    // a chunk a visible tile already loaded, so this is a HashMap hit.
+    let key = (x >> 4, z >> 4);
+    if !cache.chunks.contains_key(&key) {
+        let loaded = render::load_chunk(&region_dir, key.0, key.1)?;
+        cache.insert_loaded(key, loaded);
+    }
+    let Some(chunk) = cache.chunks.get(&key).and_then(|c| c.as_ref()) else {
+        return Ok(BlockInfo { y: None, name: None, id: None });
+    };
+
+    // Chunk-local coordinates; the chunk covers x&15, z&15.
+    let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
+    let Some((block, by)) = chunk.top_block_ref(lx, lz, ymax) else {
+        return Ok(BlockInfo { y: None, name: None, id: None });
+    };
+
+    let id = match block {
+        render::BlockRefRef::Legacy(id, meta) => format!("{}:{}", id, meta),
+        render::BlockRefRef::Named(name) => name.to_string(),
+    };
+    let owned: BlockRef = block.to_owned_ref();
+    Ok(BlockInfo {
+        y: Some(by),
+        name: Some(cache.palette.display_name(&owned)),
+        id: Some(id),
+    })
+}
+
 fn render_tile_png(
     state: &AppState,
     dim: i32,
@@ -111,7 +178,8 @@ pub fn run() {
             open_world,
             get_world_info,
             invalidate_cache,
-            pick_save_folder
+            pick_save_folder,
+            probe_block
         ])
         .register_asynchronous_uri_scheme_protocol("tile", |ctx, request, responder| {
             let app = ctx.app_handle().clone();

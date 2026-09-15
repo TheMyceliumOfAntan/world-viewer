@@ -244,3 +244,12 @@ body,
   font-size: 12px;
   color: #9aa3b8;
 }
+
+/* Keep the bar exactly one line: a long modded block name must not wrap and
+   steal height from the map. Shrink with an ellipsis instead. */
+.statusbar span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}

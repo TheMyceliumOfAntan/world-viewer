@@ -48,6 +48,37 @@
 
 占位命令，当前始终返回 `null`。目录选择实际由前端 `@tauri-apps/plugin-dialog` 的 `open({ directory: true })` 完成。
 
+### 1.5 `probe_block`
+
+查询一个世界列（x, z）在 `ymax` 过滤下的最高非空气方块，供底部状态栏显示 Y 坐标与方块信息。
+
+**为什么需要后端查询**：地图是 `CRS.Simple` 二维平面，屏幕坐标只能推出 X/Z；Y 是垂直轴，不在平面内，必须由后端扫描列才能得到。
+
+```ts
+invoke<BlockInfo>("probe_block", { dim: 0, x: -415, z: -286, ymaxU: 4294967295 })
+```
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `dim` | i32 | 维度 id |
+| `x` | i32 | 世界 X 坐标（方块） |
+| `z` | i32 | 世界 Z 坐标（方块） |
+| `ymaxU` | u32 | 同瓦片协议：`4294967295` = 全高，否则按 `min(255)` 截断 |
+
+返回 `BlockInfo`：
+
+```ts
+{ y: number | null, name: string | null, id: string | null }
+```
+
+- `y`：该列最高非空气方块的 Y；列全为空气或区块未生成时为 `null`。
+- `name`：可读名，优先 JourneyMap 显示名（GTNH 等 legacy 存档为中文，如「宏伟之木树叶」）；现代存档回落到原始 id。
+- `id`：原始标识，legacy 为 `id:meta`（如 `31:1`），1.13+ 为 `minecraft:xxx`。
+
+**与瓦片渲染同源**：复用 `render::TileCache` 的区块缓存（可见瓦片几乎总会把该区块读进缓存，因此通常是 HashMap 命中）；`ymax` 语义、`top_block_ref` 列扫描逻辑与渲染器完全一致，因此状态栏显示的方块就是该点渲染出的表面方块。
+
+**调用频率**：前端在 `mousemove` 上以 150ms 节流调用，并用递增序号丢弃过期响应，避免慢回包覆盖新结果。
+
 ## 2. 数据结构
 
 ### 2.1 `WorldInfo`
@@ -129,6 +160,8 @@ http://tile.localhost/{worldKey}/{dim}/{z}/{x}/{y}.png?ymax=N
 
 **路径段数必须为 5**，否则返回 404 与错误文本。
 
+**`z` 必须是整数字面量**：后端用 `parse::<i32>()` 解析，`/0/0.5/-3/-2.png` 这类小数 zoom 会解析失败并返回 404。前端若把小数缩放（`zoomSnap: 0.25` 下的 `mapZoom=2.5`）直接当瓦片 zoom 传下来，所有瓦片都会 404、地图全黑。前端在 `CachedTileLayer._clampZoom` 唯一入口对 zoom 取整（详见 `6-UI组件设计/前端组件.md` §3.6）。
+
 ### 3.2 缩放与覆盖范围
 
 | zoom | 每瓦片区块数 | 每方块像素 |
@@ -209,11 +242,5 @@ http://tile.localhost/{worldKey}/{dim}/{z}/{x}/{y}.png?ymax=N
 | 日期 | 版本 | 修改内容 | 修改人 |
 | 2026-09-14 | v1.0 | 初版创建 | AI Agent |
 | 2026-09-15 | v1.1 | WorldInfo 新增 world_seed（字符串，防 i64 精度丢失）；前端瓦片层契约补充模板切换须成对清空 queue/waiting | AI Agent |
-
-
-
-### 2026-09-15 更新
-**路径段数必须为 5**，否则返回 404 与错误文本。
-
-**`z` 必须是整数字面量**：后端用 `parse::<i32>()` 解析，`/0/0.5/-3/-2.png` 这类小数 zoom 会解析失败并返回 404。前端若把小数缩放（`zoomSnap: 0.25` 下的 `mapZoom=2.5`）直接当瓦片 zoom 传下来，所有瓦片都会 404、地图全黑。前端在 `CachedTileLayer._clampZoom` 唯一入口对 zoom 取整（详见 `6-UI组件设计/前端组件.md` §3.6）。
+| 2026-09-15 | v1.2 | 瓦片协议补充 z 必须为整数字面量；新增 probe_block 命令与 BlockInfo 结构（状态栏 Y 坐标与方块信息） | AI Agent |
 

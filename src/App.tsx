@@ -41,6 +41,9 @@ type WorldInfo = {
 
 type OpenResult = { ok: boolean; info: WorldInfo | null; error: string | null };
 
+/** Top-most non-air block of the hovered column (see `probe_block`). */
+type BlockInfo = { y: number | null; name: string | null; id: string | null };
+
 const DEFAULT_SAVE = "C:\\.minecraft\\versions\\GTNH 2.8.4\\saves\\新的世界 - 副本";
 
 function tileUrl(dim: number, ymax: number, worldKey: string) {
@@ -96,6 +99,52 @@ export default function App() {
   const [ymax, setYmax] = useState<number>(255);
   const [loading, setLoading] = useState(false);
   const [mouse, setMouse] = useState<{ x: number; z: number } | null>(null);
+  const [block, setBlock] = useState<BlockInfo | null>(null);
+  // Latest probe request, so a slow earlier reply cannot overwrite a newer one.
+  const probeSeqRef = useRef(0);
+  const probeTimerRef = useRef<number | null>(null);
+  // The mousemove handler is registered once, so it must read the current
+  // world/dim/ymax through a ref rather than a stale closure.
+  const latestRef = useRef({ loaded: false, dim: 0, ymax: 255 });
+  latestRef.current = { loaded: !!info, dim, ymax };
+  const lastProbeRef = useRef<{ x: number; z: number } | null>(null);
+
+  const runProbe = async (x: number, z: number) => {
+    lastProbeRef.current = { x, z };
+    const { loaded, dim: d, ymax: y } = latestRef.current;
+    if (!loaded) {
+      setBlock(null);
+      return;
+    }
+    const seq = ++probeSeqRef.current;
+    try {
+      const r = await invoke<BlockInfo>("probe_block", {
+        dim: d,
+        x,
+        z,
+        ymaxU: y >= 255 ? 4294967295 : y,
+      });
+      if (seq === probeSeqRef.current) setBlock(r);
+    } catch {
+      if (seq === probeSeqRef.current) setBlock(null);
+    }
+  };
+
+  const scheduleProbe = (x: number, z: number) => {
+    lastProbeRef.current = { x, z };
+    if (probeTimerRef.current !== null) return;
+    probeTimerRef.current = window.setTimeout(() => {
+      probeTimerRef.current = null;
+      const p = lastProbeRef.current;
+      if (p) void runProbe(p.x, p.z);
+    }, 150);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (probeTimerRef.current !== null) window.clearTimeout(probeTimerRef.current);
+    };
+  }, []);
 
   const ensureMap = () => {
     if (mapRef.current || !mapDivRef.current) return mapRef.current;
@@ -111,7 +160,10 @@ export default function App() {
     mapRef.current = map;
     map.on("mousemove", (e: L.LeafletMouseEvent) => {
       // Leaflet CRS.Simple: lat = -worldZ, lng = worldX (in blocks at zoom 0 scale)
-      setMouse({ x: Math.round(e.latlng.lng), z: Math.round(-e.latlng.lat) });
+      const x = Math.round(e.latlng.lng);
+      const z = Math.round(-e.latlng.lat);
+      setMouse({ x, z });
+      scheduleProbe(x, z);
     });
     return map;
   };
@@ -357,7 +409,15 @@ export default function App() {
       </div>
 
       <footer className="statusbar">
-        <span>坐标: {mouse ? `X=${mouse.x} Z=${mouse.z}` : "—"}</span>
+        <span>
+          坐标: {mouse ? `X=${mouse.x} ${block?.y != null ? `Y=${block.y} ` : ""}Z=${mouse.z}` : "—"}
+        </span>
+        <span>
+          方块:{" "}
+          {block?.name
+            ? `${block.name}${block.id && block.id !== block.name ? ` (${block.id})` : ""}`
+            : "—"}
+        </span>
         <span>维度: {info?.dimensions.find((d) => d.id === dim)?.name ?? "—"}</span>
         <span>层: {ymax === 255 ? "全高" : `Y ≤ ${ymax}`}</span>
         <span>种子: {info?.world_seed || "—"}</span>
