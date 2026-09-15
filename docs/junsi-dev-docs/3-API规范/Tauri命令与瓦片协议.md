@@ -113,8 +113,25 @@ invoke<BlockInfo>("probe_block", { dim: 0, x: -415, z: -286, ymaxU: 4294967295 }
   region_dir: string;  // region 目录绝对路径
   chunk_count: number; // 该维度已生成的区块总数
   has_data: boolean;   // 恒为 true（无数据的维度不会出现在列表里）
+  min_y: number;       // 该维度最低方块 Y（含）
+  max_y: number;       // 该维度最高方块 Y（含）
 }
 ```
+
+#### 高度范围如何确定
+
+世界高度**不在 level.dat 里**（`min_y`/`height` 属于数据包定义，不写入存档）。唯一可靠来源是区块本身：
+
+| 存档格式 | 区块 section 列表 | 探测结果 |
+|---|---|---|
+| 1.13+（扁平化） | **完整**，含空 section | 取极值即真实范围。1.20 主世界为 section -4..19 → **block Y -64..319** |
+| 1.12-（legacy） | 仅非空 section（GTNH 区块只有 Y=0..4） | 无法推导，回退 **0..255** |
+
+判据用 `block_states` 是否存在来区分两种格式（该字段仅 1.13+ 有），而不是靠 section 数量——legacy 区块的 section 数同样可能大于 1。
+
+探测成本：只读每个 region 目录里前 2 个 `.mca` 文件的第一个非空区块，与既有的 `count_regions` 扫描同量级。
+
+**为什么必须动态**：1.20+ 世界最高到 Y=319，旧实现把 `ymax` 硬编码截断在 255，会静默隐藏 Y>255 的全部方块；同时 1.18+ 世界最低为 Y=-64，固定从 0 起会丢失整个深板岩层。
 
 ### 2.3 `PlayerInfo`
 
@@ -156,11 +173,13 @@ http://tile.localhost/{worldKey}/{dim}/{z}/{x}/{y}.png?ymax=N
 | `z` | i32 | 缩放级别，0..=4 |
 | `x` | i32 | 瓦片列号，可为负 |
 | `y` | i32 | 瓦片行号，可为负 |
-| `ymax` | u32 | 高度切层上限；`4294967295` 表示全高（内部转为 255） |
+| `ymax` | i64 | 高度切层上限，**可为负**（1.18+ 世界最低 Y=-64）；`4294967295` 表示全高 |
 
 **路径段数必须为 5**，否则返回 404 与错误文本。
 
 **`z` 必须是整数字面量**：后端用 `parse::<i32>()` 解析，`/0/0.5/-3/-2.png` 这类小数 zoom 会解析失败并返回 404。前端若把小数缩放（`zoomSnap: 0.25` 下的 `mapZoom=2.5`）直接当瓦片 zoom 传下来，所有瓦片都会 404、地图全黑。前端在 `CachedTileLayer._clampZoom` 唯一入口对 zoom 取整（详见 `6-UI组件设计/前端组件.md` §3.6）。
+
+**`ymax` 是有符号的**：必须能表达负高度（1.18+ 世界最低 Y=-64），若按 `u32` 解析则 `ymax=-64` 会解析失败并静默回退到全高，负 Y 过滤形同失效。全高哨兵 `4294967295` 会被解析为该维度自身的 `max_y`（不是固定 255），超出范围的值 clamp 到 `[min_y, max_y]`。
 
 ### 3.2 缩放与覆盖范围
 
@@ -243,4 +262,5 @@ http://tile.localhost/{worldKey}/{dim}/{z}/{x}/{y}.png?ymax=N
 | 2026-09-14 | v1.0 | 初版创建 | AI Agent |
 | 2026-09-15 | v1.1 | WorldInfo 新增 world_seed（字符串，防 i64 精度丢失）；前端瓦片层契约补充模板切换须成对清空 queue/waiting | AI Agent |
 | 2026-09-15 | v1.2 | 瓦片协议补充 z 必须为整数字面量；新增 probe_block 命令与 BlockInfo 结构（状态栏 Y 坐标与方块信息） | AI Agent |
+| 2026-09-15 | v1.3 | DimensionInfo 新增 min_y/max_y（按区块 section 动态探测高度范围）；ymax 改为有符号以支持 1.18+ 负 Y | AI Agent |
 

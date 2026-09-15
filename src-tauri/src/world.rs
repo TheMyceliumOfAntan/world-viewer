@@ -11,6 +11,10 @@ pub struct DimensionInfo {
     pub region_dir: String,
     pub chunk_count: u32,
     pub has_data: bool,
+    /// Lowest block Y the dimension can contain (inclusive).
+    pub min_y: i32,
+    /// Highest block Y the dimension can contain (inclusive).
+    pub max_y: i32,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -107,13 +111,17 @@ pub fn open_world(save_dir: &Path, instance_root_override: Option<PathBuf>) -> R
     // under dimensions/minecraft/overworld/ instead.
     let (files, chunks) = count_regions(&save_dir.join("region"));
     if files > 0 {
+        let region_dir = save_dir.join("region");
+        let (min_y, max_y) = detect_height_range(&region_dir);
         dimensions.push(DimensionInfo {
             id: 0,
             name: palette::dimension_name(0, &instance_root.join("config"))
                 .unwrap_or_else(|| "主世界".into()),
-            region_dir: save_dir.join("region").to_string_lossy().into_owned(),
+            region_dir: region_dir.to_string_lossy().into_owned(),
             chunk_count: chunks,
             has_data: true,
+            min_y,
+            max_y,
         });
     }
 
@@ -136,6 +144,7 @@ pub fn open_world(save_dir: &Path, instance_root_override: Option<PathBuf>) -> R
         if files == 0 {
             continue;
         }
+        let (min_y, max_y) = detect_height_range(&dir);
         dimensions.push(DimensionInfo {
             id,
             name: palette::dimension_name(id, &instance_root.join("config"))
@@ -143,6 +152,8 @@ pub fn open_world(save_dir: &Path, instance_root_override: Option<PathBuf>) -> R
             region_dir: dir.to_string_lossy().into_owned(),
             chunk_count: chunks,
             has_data: true,
+            min_y,
+            max_y,
         });
     }
 
@@ -222,12 +233,15 @@ fn scan_namespaced_dimensions(
         }
         let name = palette::dimension_name(id, &instance_root.join("config"))
             .unwrap_or_else(|| full.clone());
+        let (min_y, max_y) = detect_height_range(&region_dir);
         dimensions.push(DimensionInfo {
             id,
             name,
             region_dir: region_dir.to_string_lossy().into_owned(),
             chunk_count: chunks,
             has_data: true,
+            min_y,
+            max_y,
         });
     }
 }
@@ -243,6 +257,105 @@ fn stable_dimension_id(name: &str) -> i32 {
     }
     // Map into -2_000_000..=-1_000_001 to stay clear of -1 (nether).
     -1_000_001 - (h % 1_000_000) as i32
+}
+
+/// Vertical extent a dimension can contain, in block coordinates.
+pub const LEGACY_MIN_Y: i32 = 0;
+pub const LEGACY_MAX_Y: i32 = 255;
+
+/// Detect a dimension's block-Y range by sampling one generated chunk.
+///
+/// From 1.13 on, chunks carry the full section list including empty ones, so
+/// the extremes are the dimension's real limits: a 1.20 overworld reports
+/// sections -4..19 => block Y -64..319. Modded datapacks can move these
+/// further, and the sample follows whatever the world actually uses.
+///
+/// Pre-1.13 chunks only store non-empty sections (a GTNH chunk has just
+/// Y=0..4), so the extremes say nothing about the world height. Those fall
+/// back to the vanilla legacy range 0..255.
+///
+/// Returns `(min_y, max_y)`.
+fn detect_height_range(region_dir: &Path) -> (i32, i32) {
+    let Some((min_sec, max_sec)) = sample_section_range(region_dir) else {
+        return (LEGACY_MIN_Y, LEGACY_MAX_Y);
+    };
+    (min_sec * 16, max_sec * 16 + 15)
+}
+
+/// Section-Y extremes of the first readable 1.13+ chunk in a region dir.
+///
+/// Returns `None` for legacy chunks: their section list is sparse, so it
+/// cannot be used to derive the dimension's extent.
+fn sample_section_range(region_dir: &Path) -> Option<(i32, i32)> {
+    let entries = std::fs::read_dir(region_dir).ok()?;
+    let mut regions: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("mca"))
+        .collect();
+    regions.sort();
+
+    for region in regions.iter().take(2) {
+        let Ok(data) = std::fs::read(region) else {
+            continue;
+        };
+        if data.len() < 8192 {
+            continue;
+        }
+        for i in 0..1024 {
+            if data[i * 4 + 3] == 0 {
+                continue;
+            }
+            let cx = (i % 32) as i32 + region_coord(region, true) * 32;
+            let cz = (i / 32) as i32 + region_coord(region, false) * 32;
+            let Ok(Some(chunk)) = crate::render::load_chunk(region_dir, cx, cz) else {
+                continue;
+            };
+            // `block_states` only exists in the 1.13+ flattened format, which
+            // is exactly the format that stores the full section list.
+            if !chunk.sections.iter().any(|s| s.block_states.is_some()) {
+                return None;
+            }
+            let min = chunk.sections.iter().map(|s| s.y).min()?;
+            let max = chunk.sections.iter().map(|s| s.y).max()?;
+            return Some((min, max));
+        }
+    }
+    None
+}
+
+/// Region-file X/Z coordinate parsed from its `r.<x>.<z>.mca` name.
+fn region_coord(path: &Path, x: bool) -> i32 {
+    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+        return 0;
+    };
+    let mut parts = stem.split('.');
+    if parts.next() != Some("r") {
+        return 0;
+    }
+    let first = parts.next().and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+    let second = parts.next().and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+    if x { first } else { second }
+}
+
+/// The `ymax` value that means "no height filter".
+///
+/// Kept as the historical `u32::MAX` value, but the parameter itself is
+/// signed: with 1.18+ worlds starting at Y=-64 the filter must be able to
+/// express negative heights, and a `u32` parse would reject them and silently
+/// fall back to full height.
+pub const YMAX_FULL: i64 = 4294967295;
+
+/// Resolve a `ymax` value against a dimension's real height range.
+///
+/// `YMAX_FULL` must resolve to the dimension's own ceiling — not a fixed 255,
+/// which would silently hide every block above Y=255 in a 1.20+ world.
+pub fn resolve_ymax(ymax: i64, dim: &DimensionInfo) -> i32 {
+    if ymax == YMAX_FULL {
+        dim.max_y
+    } else {
+        ymax.clamp(dim.min_y as i64, dim.max_y as i64) as i32
+    }
 }
 
 pub fn read_level_name(level_dat: &Path) -> Option<String> {

@@ -11,6 +11,8 @@ type Dimension = {
   region_dir: string;
   chunk_count: number;
   has_data: boolean;
+  min_y: number;
+  max_y: number;
 };
 
 type Waypoint = {
@@ -46,8 +48,8 @@ type BlockInfo = { y: number | null; name: string | null; id: string | null };
 
 const DEFAULT_SAVE = "C:\\.minecraft\\versions\\GTNH 2.8.4\\saves\\新的世界 - 副本";
 
-function tileUrl(dim: number, ymax: number, worldKey: string) {
-  const yPart = ymax >= 255 ? "4294967295" : String(ymax);
+function tileUrl(dim: number, ymax: number, maxY: number, worldKey: string) {
+  const yPart = ymax >= maxY ? "4294967295" : String(ymax);
   return `http://tile.localhost/${worldKey}/${dim}/{z}/{x}/{y}.png?ymax=${yPart}`;
 }
 
@@ -58,6 +60,12 @@ function worldKeyOf(saveDir: string): string {
     h = (Math.imul(31, h) + saveDir.charCodeAt(i)) | 0;
   }
   return "w" + (h >>> 0).toString(36);
+}
+
+/** Vertical extent of a dimension, falling back to the legacy range. */
+function rangeOf(dimensions: Dimension[], id: number): { min: number; max: number } {
+  const d = dimensions.find((x) => x.id === id);
+  return { min: d?.min_y ?? 0, max: d?.max_y ?? 255 };
 }
 
 /** Per-source waypoint counts for the current dimension. */
@@ -100,18 +108,25 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [mouse, setMouse] = useState<{ x: number; z: number } | null>(null);
   const [block, setBlock] = useState<BlockInfo | null>(null);
+  // Vertical extent of the current dimension. Modern saves reach -64..319,
+  // legacy ones 0..255, and modded datapacks can move both ends, so the
+  // slider range and the "full height" sentinel follow the world's own limits
+  // instead of a fixed 255.
+  const dimInfo = info?.dimensions.find((d) => d.id === dim);
+  const range = { min: dimInfo?.min_y ?? 0, max: dimInfo?.max_y ?? 255 };
+  const atFullHeight = ymax >= range.max;
   // Latest probe request, so a slow earlier reply cannot overwrite a newer one.
   const probeSeqRef = useRef(0);
   const probeTimerRef = useRef<number | null>(null);
   // The mousemove handler is registered once, so it must read the current
-  // world/dim/ymax through a ref rather than a stale closure.
-  const latestRef = useRef({ loaded: false, dim: 0, ymax: 255 });
-  latestRef.current = { loaded: !!info, dim, ymax };
+  // world/dim/height through a ref rather than a stale closure.
+  const latestRef = useRef({ loaded: false, dim: 0, ymax: 255, maxY: 255 });
+  latestRef.current = { loaded: !!info, dim, ymax, maxY: range.max };
   const lastProbeRef = useRef<{ x: number; z: number } | null>(null);
 
   const runProbe = async (x: number, z: number) => {
     lastProbeRef.current = { x, z };
-    const { loaded, dim: d, ymax: y } = latestRef.current;
+    const { loaded, dim: d, ymax: y, maxY } = latestRef.current;
     if (!loaded) {
       setBlock(null);
       return;
@@ -122,7 +137,7 @@ export default function App() {
         dim: d,
         x,
         z,
-        ymaxU: y >= 255 ? 4294967295 : y,
+        ymaxU: y >= maxY ? 4294967295 : y,
       });
       if (seq === probeSeqRef.current) setBlock(r);
     } catch {
@@ -168,8 +183,8 @@ export default function App() {
     return map;
   };
 
-  const buildTileLayer = (map: L.Map, dimension: number, ymaxVal: number) => {
-    const template = tileUrl(dimension, ymaxVal, worldKeyRef.current);
+  const buildTileLayer = (map: L.Map, dimension: number, ymaxVal: number, maxY: number) => {
+    const template = tileUrl(dimension, ymaxVal, maxY, worldKeyRef.current);
     if (layerRef.current) {
       // Reuse the layer (and its cache) unless the world or the height
       // filter changed. The world key is part of the URL, so switching saves
@@ -265,8 +280,9 @@ export default function App() {
         res.info.dimensions[0]?.id ??
         0;
       setDim(firstDim);
-      setYmax(255);
-      buildTileLayer(map, firstDim, 255);
+      const firstRange = rangeOf(res.info.dimensions, firstDim);
+      setYmax(firstRange.max);
+      buildTileLayer(map, firstDim, firstRange.max, firstRange.max);
       drawMarkers(map, res.info, firstDim);
       // center on player if present, else on spawn-ish origin
       const p = res.info.player;
@@ -288,7 +304,12 @@ export default function App() {
     setDim(id);
     const map = mapRef.current;
     if (!map) return;
-    buildTileLayer(map, id, ymax);
+    // Each dimension has its own vertical extent, so reset the height filter
+    // to the new dimension's ceiling instead of carrying the old value over.
+    const nextRange = rangeOf(info?.dimensions ?? [], id);
+    const nextYmax = Math.min(ymax, nextRange.max);
+    setYmax(nextYmax);
+    buildTileLayer(map, id, nextYmax, nextRange.max);
     if (info) drawMarkers(map, info, id);
     // Fly to the first marker in this dimension, else to origin
     const wps = info?.waypoints.filter((w) => w.dimension === id) ?? [];
@@ -306,7 +327,7 @@ export default function App() {
     setYmax(v);
     const map = mapRef.current;
     if (!map) return;
-    buildTileLayer(map, dim, v);
+    buildTileLayer(map, dim, v, range.max);
   };
 
   const pickFolder = async () => {
@@ -379,13 +400,19 @@ export default function App() {
           <div className="slider">
             <input
               type="range"
-              min={0}
-              max={255}
+              min={range.min}
+              max={range.max}
               value={ymax}
               disabled={!info}
               onChange={(e) => applyYmax(Number(e.target.value))}
             />
-            <div className="sliderval">Y ≤ {ymax === 255 ? "全高" : ymax}</div>
+            <div className="sliderval">
+              Y ≤ {atFullHeight ? "全高" : ymax}
+              <span className="dimmeta">
+                {" "}
+                （{range.min}..{range.max}）
+              </span>
+            </div>
           </div>
           <p className="hint">向下拖动可查看地下结构（洞穴/矿道）</p>
 
@@ -419,7 +446,7 @@ export default function App() {
             : "—"}
         </span>
         <span>维度: {info?.dimensions.find((d) => d.id === dim)?.name ?? "—"}</span>
-        <span>层: {ymax === 255 ? "全高" : `Y ≤ ${ymax}`}</span>
+        <span>层: {atFullHeight ? "全高" : `Y ≤ ${ymax}`}</span>
         <span>种子: {info?.world_seed || "—"}</span>
         <span>{info ? `存档: ${info.save_name}` : ""}</span>
       </footer>

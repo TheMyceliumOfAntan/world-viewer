@@ -96,21 +96,16 @@ fn probe_block(
     dim: i32,
     x: i32,
     z: i32,
-    ymax_u: u32,
+    ymax_u: i64,
     state: State<AppState>,
 ) -> Result<BlockInfo, String> {
     use render::BlockRef;
-
-    let ymax = if ymax_u == u32::MAX {
-        255
-    } else {
-        ymax_u.min(255) as i32
-    };
 
     let world_guard = state.world.lock().unwrap();
     let world = world_guard.as_ref().ok_or("未加载世界")?;
     let dim_info = world.dimension(dim).ok_or("维度不存在")?;
     let region_dir = PathBuf::from(&dim_info.region_dir);
+    let ymax = resolve_ymax(ymax_u, dim_info);
 
     let mut cache_guard = state.cache.lock().unwrap();
     let cache = cache_guard.as_mut().ok_or("缓存未初始化")?;
@@ -144,23 +139,24 @@ fn probe_block(
     })
 }
 
+/// Resolve the `ymax` query/sentinel against a dimension's real height range.
+fn resolve_ymax(ymax_u: i64, dim_info: &world::DimensionInfo) -> i32 {
+    world::resolve_ymax(ymax_u, dim_info)
+}
+
 fn render_tile_png(
     state: &AppState,
     dim: i32,
     z: i32,
     x: i32,
     row: i32,
-    ymax_u: u32,
+    ymax_u: i64,
 ) -> Result<(Vec<u8>, bool), String> {
     let world_guard = state.world.lock().unwrap();
     let world = world_guard.as_ref().ok_or("未加载世界")?;
     let dim_info = world.dimension(dim).ok_or("维度不存在")?;
     let region_dir = PathBuf::from(&dim_info.region_dir);
-    let ymax = if ymax_u == u32::MAX {
-        255
-    } else {
-        ymax_u.min(255) as i32
-    };
+    let ymax = resolve_ymax(ymax_u, dim_info);
 
     let mut cache_guard = state.cache.lock().unwrap();
     let cache = cache_guard.as_mut().ok_or("缓存未初始化")?;
@@ -244,9 +240,9 @@ fn tile_from_uri(state: &AppState, uri: &tauri::http::Uri) -> Result<(Vec<u8>, b
             q.split('&')
                 .filter_map(|kv| kv.split_once('='))
                 .find(|(k, _)| *k == "ymax")
-                .and_then(|(_, v)| v.parse::<u32>().ok())
+                .and_then(|(_, v)| v.parse::<i64>().ok())
         })
-        .unwrap_or(u32::MAX);
+        .unwrap_or(world::YMAX_FULL);
     render_tile_png(state, dim, z, x, row, ymax)
 }
 
@@ -254,7 +250,7 @@ fn tile_from_uri(state: &AppState, uri: &tauri::http::Uri) -> Result<(Vec<u8>, b
 pub mod testing {
     pub use crate::palette::Palette;
     pub use crate::render::{BlockRef, ChunkData};
-    pub use crate::world::World;
+    pub use crate::world::{resolve_ymax, DimensionInfo, World, YMAX_FULL};
 
     /// Whether a block name is foliage that needs a biome tint.
     pub fn is_foliage(name: &str) -> bool {
