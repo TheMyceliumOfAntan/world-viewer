@@ -210,3 +210,10 @@ http://tile.localhost/{worldKey}/{dim}/{z}/{x}/{y}.png?ymax=N
 | 2026-09-14 | v1.0 | 初版创建 | AI Agent |
 | 2026-09-15 | v1.1 | WorldInfo 新增 world_seed（字符串，防 i64 精度丢失）；前端瓦片层契约补充模板切换须成对清空 queue/waiting | AI Agent |
 
+
+
+### 2026-09-15 更新
+**路径段数必须为 5**，否则返回 404 与错误文本。
+
+**`z` 必须是整数字面量**：后端用 `parse::<i32>()` 解析，`/0/0.5/-3/-2.png` 这类小数 zoom 会解析失败并返回 404。前端若把小数缩放（`zoomSnap: 0.25` 下的 `mapZoom=2.5`）直接当瓦片 zoom 传下来，所有瓦片都会 404、地图全黑。前端在 `CachedTileLayer._clampZoom` 唯一入口对 zoom 取整（详见 `6-UI组件设计/前端组件.md` §3.6）。
+

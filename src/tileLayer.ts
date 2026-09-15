@@ -58,6 +58,22 @@ export class CachedTileLayer extends L.GridLayer {
     return this.urlTemplate;
   }
 
+  /**
+   * Leaflet's `_setView` rounds the zoom before clamping, but `redraw()` and
+   * `_update()` pass the raw map zoom straight through. The map uses
+   * `zoomSnap: 0.25`, so a wheel zoom can sit on a fractional zoom (2.5);
+   * those two paths then set `_tileZoom = 2.5` and request tiles at z=2.5.
+   * The backend parses the zoom as an integer and 404s, so every tile fails
+   * and the map stays black until the next integer-zoom event. Rounding in
+   * the one clamp shared by all three call sites keeps `_tileZoom` integral.
+   */
+  protected _clampZoom(zoom: number): number {
+    const base = L.GridLayer.prototype as unknown as {
+      _clampZoom(zoom: number): number;
+    };
+    return base._clampZoom.call(this, Math.round(zoom));
+  }
+
   /** Drop cached tiles for the previous world/height without touching the map. */
   clearCache() {
     this.cache.clear();
