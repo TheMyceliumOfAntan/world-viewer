@@ -30,6 +30,51 @@ pub fn is_air_name(name: &str) -> bool {
     name == "minecraft:air" || name == "minecraft:cave_air" || name == "minecraft:void_air"
 }
 
+/// Water block names. Used to decide whether a column's surface is a water
+/// surface, in which case the column scan continues down to the sea floor.
+#[inline]
+pub fn is_water_name(name: &str) -> bool {
+    let base = name.split('[').next().unwrap_or(name);
+    let short = base.split(':').next_back().unwrap_or(base);
+    short == "water" || short == "flowing_water"
+}
+
+/// Toggles for the renderer. All default to `true`.
+#[derive(Debug, Clone, Copy)]
+pub struct RenderOpts {
+    /// See through water: scan down to the sea floor and blend the surface
+    /// water colour toward it with depth. When off, water renders as a flat
+    /// water-coloured block.
+    pub water: bool,
+    /// Slope shading (directional relief).
+    pub shading: bool,
+    /// Part of shading: lighten terrain by altitude.
+    pub altitude: bool,
+}
+
+impl Default for RenderOpts {
+    fn default() -> Self {
+        RenderOpts {
+            water: true,
+            shading: true,
+            altitude: true,
+        }
+    }
+}
+
+impl RenderOpts {
+    /// Parse the `water`/`shade`/`alt` tile query flags. Absent flags default
+    /// to on, so existing URLs keep their behaviour.
+    pub fn from_query(get: impl Fn(&str) -> Option<String>) -> Self {
+        let flag = |k: &str| get(k).map(|v| v != "0").unwrap_or(true);
+        RenderOpts {
+            water: flag("water"),
+            shading: flag("shade"),
+            altitude: flag("alt"),
+        }
+    }
+}
+
 /// A borrowed block reference, used on hot paths to avoid allocating a
 /// `String` for every block inspected while scanning a column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
