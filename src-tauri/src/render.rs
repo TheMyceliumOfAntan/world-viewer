@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use crate::biome::{self, BiomeDef, TintKind};
 use crate::palette::Palette;
@@ -451,7 +452,7 @@ impl Surface {
     #[allow(clippy::too_many_arguments)]
     pub fn fill(
         &mut self,
-        cache: &mut TileCache,
+        cache: &TileCache,
         region_dir: &Path,
         chunk_x0: i32,
         chunk_z0: i32,
@@ -464,61 +465,52 @@ impl Surface {
             water: opts.water,
         };
 
-        // 1. work out which chunks are not cached yet
-        let mut coords: Vec<(i32, i32)> = Vec::new();
+        // The chunk keys this tile covers, in a fixed order so the surface does
+        // not depend on thread scheduling.
+        let mut keys: Vec<ChunkKey> = Vec::new();
         for cz in -1..=chunks_per_tile {
             for cx in -1..=chunks_per_tile {
-                let key = (chunk_x0 + cx, chunk_z0 + cz);
-                if !cache.chunks.contains_key(&key) {
-                    coords.push(key);
-                }
+                keys.push((chunk_x0 + cx, chunk_z0 + cz));
             }
         }
 
-        // 2. read + parse the missing ones in parallel
-        if !coords.is_empty() {
-            let loaded = load_chunks_parallel(region_dir, &coords);
-            for (key, data) in loaded {
-                cache.insert_loaded(key, data);
-            }
-        }
+        // Load anything missing and take shared handles to all of them. The
+        // expensive surface scan below runs with no cache lock held, so
+        // concurrent tile requests do not serialize behind each other.
+        let chunks = cache.acquire(region_dir, &keys);
 
-        // 3. copy the visible surface out of the cache (single-threaded, ordered)
-        for cz in -1..=chunks_per_tile {
-            for cx in -1..=chunks_per_tile {
-                let ox = cx * 16;
-                let oz = cz * 16;
-                if let Some(Some(chunk)) = cache.chunks.get(&(chunk_x0 + cx, chunk_z0 + cz)) {
-                    for lz in 0..16i32 {
-                        for lx in 0..16i32 {
-                            let gx = ox + lx;
-                            let gz = oz + lz;
-                            if gx < -1 || gz < -1 || gx > lim || gz > lim {
-                                continue;
-                            }
-                            let scan =
-                                chunk.scan_column(lx as usize, lz as usize, ymax, &scan_opts);
-                            let Some((block, y)) = scan.block else { continue };
+        // 3. copy the visible surface out of the acquired chunks
+        for (i, chunk) in keys.iter().zip(chunks.iter()) {
+            let Some(chunk) = chunk else { continue };
+            // Row-major chunk index within the tile, offset by the -1 margin.
+            let ox = (i.0 - chunk_x0) * 16;
+            let oz = (i.1 - chunk_z0) * 16;
+            for lz in 0..16i32 {
+                for lx in 0..16i32 {
+                    let gx = ox + lx;
+                    let gz = oz + lz;
+                    if gx < -1 || gz < -1 || gx > lim || gz > lim {
+                        continue;
+                    }
+                    let scan = chunk.scan_column(lx as usize, lz as usize, ymax, &scan_opts);
+                    let Some((block, y)) = scan.block else { continue };
 
-                            let (rgb, _src, name) = cache.palette.color_ref(&block.to_owned_ref());
-                            let c = resolve_color(rgb, &name, scan.tint);
-                            let i = self.idx(gx, gz);
-                            self.color[i] = c;
-                            self.height[i] = y;
+                    let (rgb, _src, name) = cache.palette.color_ref(&block.to_owned_ref());
+                    let c = resolve_color(rgb, &name, scan.tint);
+                    let si = self.idx(gx, gz);
+                    self.color[si] = c;
+                    self.height[si] = y;
 
-                            if scan.water_top.is_some() {
-                                self.water_top[i] = y;
-                                if let Some((fb, fy)) = scan.floor_block {
-                                    let (frgb, _s, fname) =
-                                        cache.palette.color_ref(&fb.to_owned_ref());
-                                    self.floor_color[i] = resolve_color(frgb, &fname, scan.tint);
-                                    self.floor_height[i] = fy;
-                                } else {
-                                    // Water column with no floor (void world).
-                                    self.floor_color[i] = c;
-                                    self.floor_height[i] = y;
-                                }
-                            }
+                    if scan.water_top.is_some() {
+                        self.water_top[si] = y;
+                        if let Some((fb, fy)) = scan.floor_block {
+                            let (frgb, _s, fname) = cache.palette.color_ref(&fb.to_owned_ref());
+                            self.floor_color[si] = resolve_color(frgb, &fname, scan.tint);
+                            self.floor_height[si] = fy;
+                        } else {
+                            // Water column with no floor (void world).
+                            self.floor_color[si] = c;
+                            self.floor_height[si] = y;
                         }
                     }
                 }
@@ -599,7 +591,7 @@ fn lerp(a: [u8; 3], b: [u8; 3], ratio: f32) -> [u8; 3] {
 /// covers no generated chunks at all, which the frontend renders differently
 /// from a tile that simply has not loaded yet.
 pub fn render_tile(
-    cache: &mut TileCache,
+    cache: &TileCache,
     region_dir: &Path,
     zoom: i32,
     tile_x: i32,
@@ -690,39 +682,171 @@ fn load_chunks_parallel(region_dir: &Path, coords: &[ChunkKey]) -> Vec<(ChunkKey
     })
 }
 
+/// Chunk cache with least-recently-used eviction.
+///
+/// The previous policy dropped an arbitrary 25% of the map when full. HashMap
+/// iteration order is effectively random, so hot chunks near the viewport were
+/// evicted with the same probability as chunks the user had already panned
+/// away from. Panning back and forth then re-read the same terrain from disk
+/// on every pass. LRU keeps the working set instead.
+///
+/// Chunks are handed out as `Arc<ChunkData>` and the lock only guards the map.
+/// Rendering a z=0 tile scans 324 chunks and takes tens of milliseconds; if the
+/// lock covered that, the six concurrent tile requests the frontend issues
+/// would run one after another (measured: 0.94x speedup, i.e. no parallelism).
+/// Callers grab the chunks they need, release the lock, then render.
 pub struct TileCache {
-    pub chunks: HashMap<ChunkKey, Option<ChunkData>>,
+    inner: Mutex<CacheInner>,
     pub palette: Palette,
     capacity: usize,
+}
+
+struct CacheInner {
+    chunks: HashMap<ChunkKey, Option<Arc<ChunkData>>>,
+    /// Last-use stamp per resident key. Same key set as `chunks`.
+    stamps: HashMap<ChunkKey, u64>,
+    next_tick: u64,
+    /// Diagnostics: how often a requested chunk was already resident.
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+}
+
+impl CacheInner {
+    fn touch(&mut self, key: ChunkKey) {
+        self.next_tick += 1;
+        self.stamps.insert(key, self.next_tick);
+    }
+
+    /// Evict least-recently-used entries down to the low-water mark.
+    ///
+    /// Sorts the stamps once per batch rather than scanning for the minimum
+    /// once per eviction. The scan version was O(n) per evicted entry, so
+    /// draining 512 entries from a 4096-entry cache cost ~2M comparisons and
+    /// dominated the render once the cache stayed full — which it does, since
+    /// one zoom-0 viewport (~6300 chunks) already exceeds the cache.
+    fn evict_for(&mut self, capacity: usize) {
+        let target = capacity - capacity / 8;
+        let excess = self.chunks.len().saturating_sub(target);
+        if excess == 0 {
+            return;
+        }
+        let mut by_age: Vec<(u64, ChunkKey)> =
+            self.stamps.iter().map(|(k, t)| (*t, *k)).collect();
+        by_age.sort_unstable();
+        for (_, key) in by_age.into_iter().take(excess) {
+            self.chunks.remove(&key);
+            self.stamps.remove(&key);
+            self.evictions += 1;
+        }
+    }
+
+    fn insert(&mut self, capacity: usize, key: ChunkKey, data: Option<Arc<ChunkData>>) {
+        let existed = self.chunks.contains_key(&key);
+        if !existed && self.chunks.len() >= capacity {
+            self.evict_for(capacity);
+        }
+        self.chunks.insert(key, data);
+        self.touch(key);
+    }
 }
 
 impl TileCache {
     pub fn new(palette: Palette, capacity: usize) -> Self {
         TileCache {
-            chunks: HashMap::new(),
+            inner: Mutex::new(CacheInner {
+                chunks: HashMap::new(),
+                stamps: HashMap::new(),
+                next_tick: 0,
+                hits: 0,
+                misses: 0,
+                evictions: 0,
+            }),
             palette,
             capacity,
         }
     }
 
-    /// Insert an already-loaded chunk, evicting if over capacity.
-    pub fn insert_loaded(&mut self, key: ChunkKey, data: Option<ChunkData>) {
-        if !self.chunks.contains_key(&key) && self.chunks.len() >= self.capacity {
-            let keys: Vec<ChunkKey> = self
-                .chunks
-                .keys()
-                .take(self.capacity / 4)
-                .cloned()
-                .collect();
-            for k in keys {
-                self.chunks.remove(&k);
-            }
-        }
-        self.chunks.insert(key, data);
+    /// `(hits, misses, evictions, resident)`, for tests and diagnostics.
+    pub fn stats(&self) -> (u64, u64, u64, usize) {
+        let inner = self.inner.lock().unwrap();
+        (
+            inner.hits,
+            inner.misses,
+            inner.evictions,
+            inner.chunks.len(),
+        )
     }
 
-    pub fn invalidate(&mut self) {
-        self.chunks.clear();
+    /// Take shared handles to every one of `keys`, loading any that are not
+    /// resident yet.
+    ///
+    /// The result has one entry per key, in order; `None` means the world has
+    /// no chunk there.
+    ///
+    /// Correctness must not depend on the cache being large enough to hold a
+    /// whole tile. Resident chunks are taken in one lock acquisition, and each
+    /// freshly loaded chunk is captured as an `Arc` at insert time, so a chunk
+    /// cannot be evicted between being found and being handed out — even when
+    /// the cache is smaller than the tile. Holding the `Arc` keeps it alive for
+    /// the caller's whole scan regardless of later eviction.
+    pub fn acquire(
+        &self,
+        region_dir: &Path,
+        keys: &[ChunkKey],
+    ) -> Vec<Option<Arc<ChunkData>>> {
+        let mut out: Vec<Option<Arc<ChunkData>>> = vec![None; keys.len()];
+        let mut found = vec![false; keys.len()];
+
+        // 1. everything already resident, under one lock
+        {
+            let mut inner = self.inner.lock().unwrap();
+            for (i, key) in keys.iter().enumerate() {
+                match inner.chunks.get(key) {
+                    Some(entry) => {
+                        out[i] = entry.clone();
+                        found[i] = true;
+                        inner.hits += 1;
+                        inner.touch(*key);
+                    }
+                    None => inner.misses += 1,
+                }
+            }
+        }
+
+        // 2. load the rest; grab each Arc as it is inserted
+        let missing: Vec<ChunkKey> = keys
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !found[*i])
+            .map(|(_, k)| *k)
+            .collect();
+        if !missing.is_empty() {
+            let loaded = load_chunks_parallel(region_dir, &missing);
+            let mut inner = self.inner.lock().unwrap();
+            for (key, data) in loaded {
+                let arc = data.map(Arc::new);
+                inner.insert(self.capacity, key, arc.clone());
+                for (i, k) in keys.iter().enumerate() {
+                    if *k == key {
+                        out[i] = arc.clone();
+                    }
+                }
+            }
+        }
+
+        out
+    }
+
+    /// One chunk by key, loading it if not resident.
+    pub fn get_or_load(&self, region_dir: &Path, key: ChunkKey) -> Option<Arc<ChunkData>> {
+        self.acquire(region_dir, &[key]).into_iter().next().flatten()
+    }
+
+    pub fn invalidate(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.chunks.clear();
+        inner.stamps.clear();
     }
 }
 

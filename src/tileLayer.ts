@@ -30,10 +30,47 @@ export class CachedTileLayer extends L.GridLayer {
   private urlTemplate = "";
   private maxConcurrent: number;
   private failures = new Set<string>();
+  /**
+   * Upper bound on cached bitmaps. A 256x256 RGBA bitmap is ~256 KiB, so an
+   * unbounded cache reached ~256 MB after a thousand tiles of panning. The
+   * frontend cache is a fast path in front of the server's chunk cache; it does
+   * not need to hold the whole world, only the tiles near the viewport.
+   */
+  private maxCached: number;
 
-  constructor(options?: L.GridLayerOptions & { maxConcurrent?: number }) {
+  constructor(options?: L.GridLayerOptions & { maxConcurrent?: number; maxCached?: number }) {
     super({ tileSize: 256, ...options });
     this.maxConcurrent = options?.maxConcurrent ?? 6;
+    this.maxCached = options?.maxCached ?? 512;
+  }
+
+  /**
+   * Move `key` to the most-recently-used end and drop the oldest entries.
+   *
+   * `Map` iterates in insertion order, so re-inserting on use makes iteration
+   * order equal recency order; eviction is then just the first key. This is the
+   * whole LRU — no separate bookkeeping, since the key is the URL and the value
+   * is only reachable through it.
+   */
+  private remember(key: string, bitmap: ImageBitmap) {
+    this.cache.delete(key);
+    this.cache.set(key, bitmap);
+    while (this.cache.size > this.maxCached) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest === undefined) break;
+      this.cache.delete(oldest);
+      // The empty-set is a sibling of the cache and must not outgrow it.
+      this.empty.delete(oldest);
+    }
+  }
+
+  private recall(key: string): ImageBitmap | undefined {
+    const bitmap = this.cache.get(key);
+    if (bitmap) {
+      this.cache.delete(key);
+      this.cache.set(key, bitmap);
+    }
+    return bitmap;
   }
 
   setUrlTemplate(template: string) {
@@ -128,7 +165,7 @@ export class CachedTileLayer extends L.GridLayer {
   }
 
   private load(key: string, url: string, onReady: (img: TileImage | null) => void) {
-    const cached = this.cache.get(key);
+    const cached = this.recall(key);
     if (cached) {
       onReady({ bitmap: cached, isEmpty: this.empty.has(key) });
       return;
@@ -156,7 +193,7 @@ export class CachedTileLayer extends L.GridLayer {
           const isEmpty = resp.headers.get("X-Tile-Empty") === "1";
           const blob = await resp.blob();
           const bitmap = await createImageBitmap(blob);
-          this.cache.set(key, bitmap);
+          this.remember(key, bitmap);
           this.done();
           if (isEmpty) this.empty.add(key);
           else this.empty.delete(key);
@@ -201,7 +238,7 @@ export class CachedTileLayer extends L.GridLayer {
       const qx = coords.x - px * 2;
       const qy = coords.y - py * 2;
       const parentKey = this.urlFor({ ...coords, z: coords.z - 1, x: px, y: py });
-      const parent = this.cache.get(parentKey);
+      const parent = this.recall(parentKey);
       if (parent) {
         ctx.imageSmoothingEnabled = true;
         ctx.drawImage(parent, -qx * size.x, -qy * size.y, size.x * 2, size.y * 2);

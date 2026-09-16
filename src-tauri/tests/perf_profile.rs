@@ -42,12 +42,17 @@ fn profile_tile_pipeline() {
     let z4_ms = t.elapsed().as_secs_f64() * 1000.0;
     eprintln!("z=4 tile (9 chunks)     : {:>8.2} ms  ({} bytes)", z4_ms, z4.len());
 
-    // --- a viewport's worth: 20 z=0 tiles, as the frontend would request ---
+    // --- a viewport's worth: 16 z=0 tiles through one shared cache ---
+    // Sharing the cache is the point: separate caches per tile would measure
+    // 16 independent cold renders and hide the effect of cache reuse between
+    // neighbouring tiles. Capacity matches production (8192).
+    let cache = testing::new_tile_cache(world.palette.clone(), 8192);
     let t = Instant::now();
     let mut total = 0usize;
     for tx in -4..0 {
         for ty in -4..0 {
-            let p = testing::render_tile(&world.palette, &region_dir, 0, 0, tx, ty, 255).unwrap();
+            let (p, _) =
+                testing::render_tile_in(&cache, &region_dir, 0, tx, ty, 255).unwrap();
             total += p.len();
         }
     }
@@ -60,8 +65,8 @@ fn profile_tile_pipeline() {
     );
 
     eprintln!(
-        "\nNOTE: a z=0 tile needs {} chunks; the server cache holds 4096, so panning",
+        "\nNOTE: a z=0 tile needs {} chunks and a viewport spans ~6500, so the",
         18 * 18
     );
-    eprintln!("a few screens evicts the working set and every tile reloads from disk.");
+    eprintln!("server cache is sized at 8192 (CHUNK_CACHE_CAPACITY) to hold one screen.");
 }

@@ -9,7 +9,7 @@ mod world;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tauri::http::Response;
 use tauri::{Manager, State};
@@ -17,9 +17,23 @@ use tauri::{Manager, State};
 use render::TileCache;
 use world::{World, WorldInfo};
 
+/// Chunks held in the shared cache.
+///
+/// A zoom-0 viewport shows 5x5 tiles and each tile needs an 18x18-chunk block,
+/// so a screen's working set is ~6500 chunks. At 4096 the cache held only 63%
+/// of one screen and thrashed: measured 17% hit rate, and panning re-read from
+/// disk constantly. At 8192 a screen fits, the hit rate jumps to ~53%, and
+/// whole-viewport render time roughly halves. Chunks are ~9.7 KiB, so this is
+/// ~78 MB — cheap next to the decoded tile bitmaps the frontend holds.
+const CHUNK_CACHE_CAPACITY: usize = 8192;
+
 pub struct AppState {
     world: Mutex<Option<World>>,
-    cache: Mutex<Option<TileCache>>,
+    /// `Arc` so a tile request can clone it and drop the lock before rendering.
+    /// Holding the guard across `render_tile` would serialize every concurrent
+    /// tile request, which is exactly what the frontend's 6-way concurrency is
+    /// meant to avoid.
+    cache: Mutex<Option<Arc<TileCache>>>,
 }
 
 impl Default for AppState {
@@ -46,9 +60,14 @@ fn open_world(path: String, state: State<AppState>) -> OpenResult {
             let info = w.info();
             let pal = palette::Palette::load(&w.instance_root, &w.level_dat)
                 .unwrap_or_else(|_| palette::Palette::empty());
-            let cache = TileCache::new(pal, 4096);
+            let cache = Arc::new(TileCache::new(pal, CHUNK_CACHE_CAPACITY));
+            // Each lock is taken and released separately: nesting them here
+            // while other commands take them in the opposite order would risk
+            // a deadlock.
             *state.world.lock().unwrap() = Some(w);
             *state.cache.lock().unwrap() = Some(cache);
+            // The previous world's region handles point at different files.
+            region::clear_region_cache();
             OpenResult {
                 ok: true,
                 info: Some(info),
@@ -70,9 +89,10 @@ fn get_world_info(state: State<AppState>) -> Option<WorldInfo> {
 
 #[tauri::command]
 fn invalidate_cache(state: State<AppState>) {
-    if let Some(c) = state.cache.lock().unwrap().as_mut() {
+    if let Some(c) = state.cache.lock().unwrap().as_ref() {
         c.invalidate();
     }
+    region::clear_region_cache();
 }
 
 #[tauri::command]
@@ -110,17 +130,17 @@ fn probe_block(
     let region_dir = PathBuf::from(&dim_info.region_dir);
     let ymax = resolve_ymax(ymax_u, dim_info);
 
-    let mut cache_guard = state.cache.lock().unwrap();
-    let cache = cache_guard.as_mut().ok_or("缓存未初始化")?;
+    let cache = state
+        .cache
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("缓存未初始化")?;
 
     // Reuse the renderer's chunk cache: the column almost always falls inside
     // a chunk a visible tile already loaded, so this is a HashMap hit.
     let key = (x >> 4, z >> 4);
-    if !cache.chunks.contains_key(&key) {
-        let loaded = render::load_chunk(&region_dir, key.0, key.1)?;
-        cache.insert_loaded(key, loaded);
-    }
-    let Some(chunk) = cache.chunks.get(&key).and_then(|c| c.as_ref()) else {
+    let Some(chunk) = cache.get_or_load(&region_dir, key) else {
         return Ok(BlockInfo { y: None, name: None, id: None });
     };
 
@@ -162,10 +182,18 @@ fn render_tile_png(
     let region_dir = PathBuf::from(&dim_info.region_dir);
     let ymax = resolve_ymax(ymax_u, dim_info);
 
-    let mut cache_guard = state.cache.lock().unwrap();
-    let cache = cache_guard.as_mut().ok_or("缓存未初始化")?;
+    // Clone the Arc and drop the world lock before rendering. `render_tile`
+    // takes tens of milliseconds; holding this lock would block `open_world`
+    // and every other tile request for that whole time.
+    let cache = state
+        .cache
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("缓存未初始化")?;
+    drop(world_guard);
 
-    let (png, has_data) = render::render_tile(cache, &region_dir, z, x, row, ymax, opts)?;
+    let (png, has_data) = render::render_tile(&cache, &region_dir, z, x, row, ymax, opts)?;
     Ok((png, has_data))
 }
 
@@ -257,7 +285,7 @@ fn tile_from_uri(state: &AppState, uri: &tauri::http::Uri) -> Result<(Vec<u8>, b
 pub mod testing {
     pub use crate::biome::{apply_tint, tint_color, BiomeDef, TintKind};
     pub use crate::palette::Palette;
-    pub use crate::region::{BlockStates, LegacyBiomes, Section};
+    pub use crate::region::{BlockStates, LegacyBiomes, RegionFile, Section};
     pub use crate::render::{BlockRef, ChunkData, RenderOpts, ScanOpts};
     pub use crate::world::{resolve_ymax, DimensionInfo, World, YMAX_FULL};
 
@@ -288,6 +316,11 @@ pub mod testing {
         cz: i32,
     ) -> Result<Option<Vec<u8>>, String> {
         crate::region::read_chunk_nbt(region_dir, cx, cz)
+    }
+
+    /// Drop the cached region handles (forces the next read to reopen files).
+    pub fn clear_region_cache() {
+        crate::region::clear_region_cache()
     }
 
     /// Full NBT parse (stage 2 of the pipeline).
@@ -379,8 +412,36 @@ pub mod testing {
         ymax: i32,
         opts: RenderOpts,
     ) -> Result<(Vec<u8>, bool), String> {
-        let mut cache = crate::render::TileCache::new(palette.clone(), 512);
-        crate::render::render_tile(&mut cache, region_dir, zoom, tile_x, tile_row, ymax, opts)
+        let cache = crate::render::TileCache::new(palette.clone(), 512);
+        crate::render::render_tile(&cache, region_dir, zoom, tile_x, tile_row, ymax, opts)
+    }
+
+    pub use crate::render::TileCache;
+
+    /// A fresh cache with the production capacity, for concurrency tests.
+    pub fn new_tile_cache(palette: Palette, capacity: usize) -> TileCache {
+        crate::render::TileCache::new(palette, capacity)
+    }
+
+    /// Render one tile through a caller-provided cache, so a test can hold the
+    /// same lock the Tauri commands hold.
+    pub fn render_tile_in(
+        cache: &TileCache,
+        region_dir: &Path,
+        zoom: i32,
+        tile_x: i32,
+        tile_row: i32,
+        ymax: i32,
+    ) -> Result<(Vec<u8>, bool), String> {
+        crate::render::render_tile(
+            cache,
+            region_dir,
+            zoom,
+            tile_x,
+            tile_row,
+            ymax,
+            RenderOpts::default(),
+        )
     }
 
     #[allow(dead_code)]
