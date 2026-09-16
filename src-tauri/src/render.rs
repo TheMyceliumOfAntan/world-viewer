@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::biome::{self, BiomeDef, TintKind};
 use crate::palette::Palette;
 use crate::region;
 
@@ -92,6 +93,15 @@ impl<'a> BlockRefRef<'a> {
         }
     }
 
+    #[inline]
+    pub fn is_water(&self) -> bool {
+        match self {
+            // 8 = flowing water, 9 = still water (both eras of the numeric table).
+            BlockRefRef::Legacy(id, _) => *id == 8 || *id == 9,
+            BlockRefRef::Named(name) => is_water_name(name),
+        }
+    }
+
     /// Take ownership, allocating only for the named variant.
     pub fn to_owned_ref(self) -> BlockRef {
         match self {
@@ -105,6 +115,9 @@ impl<'a> BlockRefRef<'a> {
 /// (1.13+) section layouts.
 pub struct ChunkData {
     pub sections: Vec<region::Section>,
+    /// Chunk-level biomes for the 1.7–1.17 formats (1.18+ carries them per
+    /// section instead).
+    pub legacy_biomes: Option<region::LegacyBiomes>,
     /// Per section, the highest local y (0..16) that holds a non-air block,
     /// or `None` when the section is entirely air. Computed once at load time
     /// so column scans can skip empty sections immediately.
@@ -116,10 +129,42 @@ pub struct ChunkData {
 
 impl ChunkData {
     pub fn new(sections: Vec<region::Section>) -> Self {
+        Self::with_biomes(sections, None)
+    }
+
+    pub fn with_biomes(
+        sections: Vec<region::Section>,
+        legacy_biomes: Option<region::LegacyBiomes>,
+    ) -> Self {
         let section_top = sections.iter().map(section_highest_non_air).collect();
         ChunkData {
             sections,
+            legacy_biomes,
             section_top,
+        }
+    }
+
+    /// Biome tints for the block at local `(x, z)` and absolute block-Y `y`.
+    ///
+    /// 1.18+ resolves a namespaced name from the section's biome palette;
+    /// older formats use the chunk-level numeric biome id.
+    fn biome_at(
+        &self,
+        section: &region::Section,
+        x: usize,
+        y: usize,
+        z: usize,
+        by: i32,
+    ) -> BiomeDef {
+        if section.biomes.is_some() {
+            return section
+                .biome_name(x, y, z)
+                .map(BiomeDef::modern)
+                .unwrap_or_default();
+        }
+        match &self.legacy_biomes {
+            Some(b) => BiomeDef::legacy(b.biome_id(x, z, by)),
+            None => BiomeDef::default(),
         }
     }
 
@@ -129,6 +174,32 @@ impl ChunkData {
     /// need an owned `BlockRef` pay for exactly one allocation per column
     /// instead of one per inspected block.
     pub fn top_block_ref(&self, x: usize, z: usize, ymax: i32) -> Option<(BlockRefRef<'_>, i32)> {
+        self.scan_column(x, z, ymax, &ScanOpts::default()).block
+    }
+
+    /// Owning convenience wrapper around [`top_block_ref`].
+    pub fn top_block(&self, x: usize, z: usize, ymax: i32) -> Option<(BlockRef, i32)> {
+        self.top_block_ref(x, z, ymax)
+            .map(|(b, y)| (b.to_owned_ref(), y))
+    }
+
+    /// Highest non-air block at (x,z) below ymax that is not fully transparent.
+    pub fn top_visible(&self, x: usize, z: usize, ymax: i32) -> Option<(BlockRef, i32)> {
+        self.top_block(x, z, ymax)
+    }
+
+    /// Scan one block column, resolving its surface and (when `water` is on)
+    /// the sea floor beneath a water surface.
+    pub fn scan_column(
+        &self,
+        x: usize,
+        z: usize,
+        ymax: i32,
+        opts: &ScanOpts,
+    ) -> ColumnScan<'_> {
+        let mut out = ColumnScan::default();
+        let mut in_water = false;
+
         for (s, top) in self.sections.iter().zip(self.section_top.iter()) {
             let base = s.y * 16;
             if base > ymax {
@@ -142,28 +213,57 @@ impl ChunkData {
                 if by > ymax {
                     continue;
                 }
-                let b = match s.block_ref(x, y as usize, z) {
-                    Some(b) => b,
-                    None => continue,
+                let Some(b) = s.block_ref(x, y as usize, z) else {
+                    continue;
                 };
-                if !b.is_air() {
-                    return Some((b, by));
+                if b.is_air() {
+                    continue;
                 }
+
+                let is_water = b.is_water();
+                if !in_water {
+                    // First solid thing from the top: the visible surface.
+                    out.block = Some((b, by));
+                    out.tint = self.biome_at(s, x, y as usize, z, by);
+                    if !(opts.water && is_water) {
+                        return out;
+                    }
+                    // It is water: keep going to find the floor.
+                    in_water = true;
+                    out.water_top = Some(by);
+                    continue;
+                }
+                if is_water {
+                    // Still submerged; the floor is deeper.
+                    continue;
+                }
+                // First non-water block below the surface: the sea floor.
+                out.floor_block = Some((b, by));
+                return out;
             }
         }
-        None
+        out
     }
+}
 
-    /// Owning convenience wrapper around [`top_block_ref`].
-    pub fn top_block(&self, x: usize, z: usize, ymax: i32) -> Option<(BlockRef, i32)> {
-        self.top_block_ref(x, z, ymax)
-            .map(|(b, y)| (b.to_owned_ref(), y))
-    }
+/// Which parts of a column to resolve.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScanOpts {
+    /// Look past a water surface for the sea floor.
+    pub water: bool,
+}
 
-    /// Highest non-air block at (x,z) below ymax that is not fully transparent.
-    pub fn top_visible(&self, x: usize, z: usize, ymax: i32) -> Option<(BlockRef, i32)> {
-        self.top_block(x, z, ymax)
-    }
+/// Result of [`ChunkData::scan_column`].
+#[derive(Default)]
+pub struct ColumnScan<'a> {
+    /// Top-most non-air block, and its block-Y.
+    pub block: Option<(BlockRefRef<'a>, i32)>,
+    /// Biome tints at the surface block.
+    pub tint: BiomeDef,
+    /// When the surface is water: its block-Y (same as the surface height).
+    pub water_top: Option<i32>,
+    /// First non-water block below a water surface, and its block-Y.
+    pub floor_block: Option<(BlockRefRef<'a>, i32)>,
 }
 
 /// Highest local y (0..16) containing a non-air block, or `None` if the
@@ -190,85 +290,93 @@ pub fn load_chunk(region_dir: &Path, cx: i32, cz: i32) -> Result<Option<ChunkDat
         Some(nbt_bytes) => {
             // 1.13+ chunks keep sections at the root; older ones nest them
             // under `Level`. Detect by peeking at the section parser output.
-            let sections = match region::parse_sections_fast(&nbt_bytes) {
-                Ok(s) if !s.is_empty() => s,
-                _ => region::parse_sections_modern(&nbt_bytes)?,
-            };
-            Ok(Some(ChunkData::new(sections)))
+            match region::parse_sections_fast_full(&nbt_bytes) {
+                Ok((s, biomes)) if !s.is_empty() => Ok(Some(ChunkData::with_biomes(s, biomes))),
+                _ => {
+                    let sections = region::parse_sections_modern(&nbt_bytes)?;
+                    Ok(Some(ChunkData::new(sections)))
+                }
+            }
         }
         None => Ok(None),
     }
 }
 
-/// Blocks whose texture is grey in the palette and must be multiplied by a
-/// biome colour before rendering.
+/// Which biome tint a block takes, by block name.
 ///
-/// The JourneyMap palette stores the *untinted* texture colour for these, so
-/// without this they render as flat grey — which is what made grass and
-/// tall grass look black-and-white while stone and dirt looked fine.
+/// The JourneyMap palette stores the *untinted* grey texture colour for the
+/// blocks vanilla tints (grass, leaves, ...), so without this they render as
+/// flat grey. Membership follows the vanilla `grass` / `foliage` / `water` /
+/// `dry_foliage` tint categories; flowers, crops and mushrooms are excluded
+/// because they carry their own colours.
 ///
-/// Membership follows the vanilla tint categories (`grass` and `foliage`);
-/// see the block tinting tables on wiki.bedrock.dev/blocks/block-tinting.
-/// Flowers, crops and mushrooms are deliberately excluded — they have their
-/// own colours and must not be tinted green.
-pub fn is_foliage(name: &str) -> bool {
+/// The decision to tint is made by [`biome::needs_tint`], which checks whether
+/// the palette colour is grey. That is what keeps modded leaves (already
+/// coloured in the palette) from being tinted twice; this function only says
+/// *which* tint to use when a tint is due.
+pub fn tint_kind(name: &str) -> TintKind {
     let base = name.split('[').next().unwrap_or(name);
     // Strip any namespace, not just "minecraft:" — modded ids like
     // "BiomesOPlenty:foliage" must classify the same way.
     let short = base.split(':').next_back().unwrap_or(base);
     let lower = short.to_ascii_lowercase();
 
+    if is_water_name(&lower) {
+        return TintKind::Water;
+    }
+    if lower == "leaf_litter" {
+        return TintKind::DryFoliage;
+    }
+
     // --- vanilla `grass` tint category ---
     if matches!(
         lower.as_str(),
         "grass" | "grass_block" | "tallgrass" | "short_grass" | "tall_grass"
             | "fern" | "large_fern" | "reeds" | "sugar_cane" | "double_plant"
-            | "grass_path" | "wildflowers"
+            | "grass_path" | "wildflowers" | "bush"
     ) {
-        return true;
+        return TintKind::Grass;
     }
 
     // --- vanilla `foliage` tint category ---
     if lower == "leaves" || lower == "leaves2" || lower == "vine" || lower == "vines" {
-        return true;
+        return TintKind::Foliage;
     }
     if lower.ends_with("_leaves") || lower.ends_with("leaves") {
-        return true;
+        return TintKind::Foliage;
     }
     if lower.ends_with("_vine") || lower.ends_with("_vines") {
-        return true;
+        return TintKind::Foliage;
     }
 
     // --- modded ground cover that behaves like grass/foliage ---
     // BiomesOPlenty:foliage, Botania grass, Thaumcraft magical leaves, etc.
-    if matches!(lower.as_str(), "foliage" | "bush" | "shrub") {
-        return true;
+    if matches!(lower.as_str(), "foliage" | "shrub") {
+        return TintKind::Grass;
     }
     if lower.ends_with("_foliage") || lower.contains("tallgrass") {
-        return true;
+        return TintKind::Grass;
     }
     if lower.ends_with("_grass") && !lower.contains("nether") && !lower.contains("warped") {
-        return true;
+        return TintKind::Grass;
     }
 
-    false
+    TintKind::None
 }
 
-/// Multiply an untinted (grey) texture colour by a temperate biome green.
-pub fn apply_foliage_tint(c: [u8; 3]) -> [u8; 3] {
-    // Standard Minecraft plains grass colour.
-    const BIOME: [f32; 3] = [0x79 as f32, 0xc0 as f32, 0x5a as f32];
-    [
-        (c[0] as f32 / 255.0 * BIOME[0]).min(255.0) as u8,
-        (c[1] as f32 / 255.0 * BIOME[1]).min(255.0) as u8,
-        (c[2] as f32 / 255.0 * BIOME[2]).min(255.0) as u8,
-    ]
+/// Resolve a palette colour into its final colour for a given biome.
+///
+/// Grey palette colours (the untinted vanilla textures) are multiplied by the
+/// biome tint; colours the palette already stores tinted are shifted relative
+/// to the plains baseline so they take the biome's hue without going dark.
+pub fn resolve_color(c: [u8; 3], name: &str, biome: BiomeDef) -> [u8; 3] {
+    biome::tint_color(c, tint_kind(name), biome)
 }
 
 /// Directional relief shading, in the spirit of VoxelMap's `applyHeight()`.
 /// Light comes from the north-west, so slopes rising toward NW are lit.
 /// `h` is a square height buffer of width `w` with a 1-block margin already applied.
-fn hillshade_at(h: &[i32], w: usize, idx: usize) -> f32 {
+fn hillshade_at(h: &[i32], w: usize, idx: usize, altitude: bool) -> f32 {
     let hc = h[idx];
     if hc == EMPTY {
         return 1.0;
@@ -289,19 +397,32 @@ fn hillshade_at(h: &[i32], w: usize, idx: usize) -> f32 {
     let slope = (dx + dz) * 0.18;
 
     // elevation term: subtle large-scale relief relative to sea level (y=64)
-    let elev = hc - 64;
-    let elev_term = (elev as f32).signum() * ((elev.abs() as f32) / 8.0 + 1.0).log10() / 5.0;
+    let elev_term = if altitude {
+        let elev = hc - 64;
+        (elev as f32).signum() * ((elev.abs() as f32) / 8.0 + 1.0).log10() / 5.0
+    } else {
+        0.0
+    };
 
     (1.0 + slope + elev_term).clamp(0.45, 1.55)
 }
 
 /// Surface buffer for a whole tile: color + height per block, with a 1-block
 /// margin so hillshading can compare against neighbouring chunks (no seams).
+///
+/// Columns whose surface is water also carry the sea floor, so the shade pass
+/// can blend the water colour toward it with depth (see [`Surface::shade`]).
 pub struct Surface {
     pub blocks: usize,
     pub side: usize,
     pub color: Vec<[u8; 3]>,
     pub height: Vec<i32>,
+    /// Water-surface block-Y for water columns, `EMPTY` otherwise.
+    pub water_top: Vec<i32>,
+    /// Sea-floor colour, valid where `water_top != EMPTY`.
+    pub floor_color: Vec<[u8; 3]>,
+    /// Sea-floor block-Y, valid where `water_top != EMPTY`.
+    pub floor_height: Vec<i32>,
 }
 
 impl Surface {
@@ -312,6 +433,9 @@ impl Surface {
             side,
             color: vec![[0u8, 0, 0]; side * side],
             height: vec![EMPTY; side * side],
+            water_top: vec![EMPTY; side * side],
+            floor_color: vec![[0u8, 0, 0]; side * side],
+            floor_height: vec![EMPTY; side * side],
         }
     }
 
@@ -324,6 +448,7 @@ impl Surface {
     /// 1-chunk margin on every side so edge pixels shade correctly.
     /// Chunks are read/parsed in parallel, then written in a deterministic
     /// order so the result does not depend on thread scheduling.
+    #[allow(clippy::too_many_arguments)]
     pub fn fill(
         &mut self,
         cache: &mut TileCache,
@@ -332,9 +457,12 @@ impl Surface {
         chunk_z0: i32,
         chunks_per_tile: i32,
         ymax: i32,
-        tint: bool,
+        opts: RenderOpts,
     ) {
         let lim = self.blocks as i32;
+        let scan_opts = ScanOpts {
+            water: opts.water,
+        };
 
         // 1. work out which chunks are not cached yet
         let mut coords: Vec<(i32, i32)> = Vec::new();
@@ -360,7 +488,6 @@ impl Surface {
             for cx in -1..=chunks_per_tile {
                 let ox = cx * 16;
                 let oz = cz * 16;
-                let mut hits: Vec<(i32, i32, BlockRef, i32)> = Vec::new();
                 if let Some(Some(chunk)) = cache.chunks.get(&(chunk_x0 + cx, chunk_z0 + cz)) {
                     for lz in 0..16i32 {
                         for lx in 0..16i32 {
@@ -369,32 +496,38 @@ impl Surface {
                             if gx < -1 || gz < -1 || gx > lim || gz > lim {
                                 continue;
                             }
-                            if let Some((block, y)) =
-                                chunk.top_visible(lx as usize, lz as usize, ymax)
-                            {
-                                hits.push((gx, gz, block, y));
+                            let scan =
+                                chunk.scan_column(lx as usize, lz as usize, ymax, &scan_opts);
+                            let Some((block, y)) = scan.block else { continue };
+
+                            let (rgb, _src, name) = cache.palette.color_ref(&block.to_owned_ref());
+                            let c = resolve_color(rgb, &name, scan.tint);
+                            let i = self.idx(gx, gz);
+                            self.color[i] = c;
+                            self.height[i] = y;
+
+                            if scan.water_top.is_some() {
+                                self.water_top[i] = y;
+                                if let Some((fb, fy)) = scan.floor_block {
+                                    let (frgb, _s, fname) =
+                                        cache.palette.color_ref(&fb.to_owned_ref());
+                                    self.floor_color[i] = resolve_color(frgb, &fname, scan.tint);
+                                    self.floor_height[i] = fy;
+                                } else {
+                                    // Water column with no floor (void world).
+                                    self.floor_color[i] = c;
+                                    self.floor_height[i] = y;
+                                }
                             }
                         }
                     }
-                }
-                for (gx, gz, block, y) in hits {
-                    let (rgb, _src, name) = cache.palette.color_ref(&block);
-                    let mut c = rgb;
-                    if tint {
-                        if is_foliage(&name) {
-                            c = apply_foliage_tint(c);
-                        }
-                    }
-                    let i = self.idx(gx, gz);
-                    self.color[i] = c;
-                    self.height[i] = y;
                 }
             }
         }
     }
 
-    /// Apply hillshading in place.
-    pub fn shade(&mut self) {
+    /// Blend water toward the sea floor by depth, then apply relief shading.
+    pub fn shade(&mut self, opts: RenderOpts) {
         let w = self.side;
         for z in 0..self.blocks {
             for x in 0..self.blocks {
@@ -402,13 +535,26 @@ impl Surface {
                 if self.height[i] == EMPTY {
                     continue;
                 }
-                let s = hillshade_at(&self.height, w, i);
-                let c = self.color[i];
-                self.color[i] = [
-                    ((c[0] as f32 * s).min(255.0)) as u8,
-                    ((c[1] as f32 * s).min(255.0)) as u8,
-                    ((c[2] as f32 * s).min(255.0)) as u8,
-                ];
+
+                if opts.water && self.water_top[i] != EMPTY {
+                    // Underwater: blend the surface toward the floor by depth.
+                    // Shallow water shows the floor (ratio ~0.5); by 40 blocks
+                    // deep the blend fades out and deep water is pure water
+                    // colour. This mirrors MCA Selector's `TileImage.shade`.
+                    let depth = (self.water_top[i] - self.floor_height[i]).max(1) as f32;
+                    let ratio = (0.5 - 0.5 / 40.0 * depth).clamp(0.0, 0.5);
+                    self.color[i] = lerp(self.color[i], self.floor_color[i], ratio);
+                }
+
+                if opts.shading {
+                    let s = hillshade_at(&self.height, w, i, opts.altitude);
+                    let c = self.color[i];
+                    self.color[i] = [
+                        ((c[0] as f32 * s).min(255.0)) as u8,
+                        ((c[1] as f32 * s).min(255.0)) as u8,
+                        ((c[2] as f32 * s).min(255.0)) as u8,
+                    ];
+                }
             }
         }
     }
@@ -419,10 +565,11 @@ impl Surface {
         let scale = TILE_SIZE / self.blocks;
         for z in 0..self.blocks {
             for x in 0..self.blocks {
-                let c = self.color[self.idx(x as i32, z as i32)];
-                if c == [0, 0, 0] {
+                let i = self.idx(x as i32, z as i32);
+                if self.height[i] == EMPTY {
                     continue;
                 }
+                let c = self.color[i];
                 let px0 = x * scale;
                 let py0 = z * scale;
                 for py in py0..(py0 + scale).min(TILE_SIZE) {
@@ -440,6 +587,13 @@ impl Surface {
     }
 }
 
+/// Linear interpolation between two colours, `ratio` in 0..=1.
+fn lerp(a: [u8; 3], b: [u8; 3], ratio: f32) -> [u8; 3] {
+    let r = ratio.clamp(0.0, 1.0);
+    let mix = |x: u8, y: u8| (x as f32 * (1.0 - r) + y as f32 * r).round() as u8;
+    [mix(a[0], b[0]), mix(a[1], b[1]), mix(a[2], b[2])]
+}
+
 /// Render one tile (TILE_SIZE x TILE_SIZE) with relief shading.
 /// Returns (png_bytes, has_any_data). `has_any_data == false` means the tile
 /// covers no generated chunks at all, which the frontend renders differently
@@ -451,6 +605,7 @@ pub fn render_tile(
     tile_x: i32,
     tile_row: i32,
     ymax: i32,
+    opts: RenderOpts,
 ) -> Result<(Vec<u8>, bool), String> {
     if !(0..=4).contains(&zoom) {
         return Err(format!("zoom {} out of range 0..=4", zoom));
@@ -469,7 +624,7 @@ pub fn render_tile(
         chunk_z0,
         chunks_per_tile,
         ymax,
-        true,
+        opts,
     );
     // Only the tile's own area counts. The surface carries a 1-block margin
     // for hillshading, and those margin pixels are not rendered, so including
@@ -477,7 +632,7 @@ pub fn render_tile(
     let has_data = (0..blocks as i32).any(|z| {
         (0..blocks as i32).any(|x| surface.height[surface.idx(x, z)] != EMPTY)
     });
-    surface.shade();
+    surface.shade(opts);
     Ok((
         encode_png(&surface.to_rgba(), TILE_SIZE as u32, TILE_SIZE as u32),
         has_data,
@@ -527,9 +682,8 @@ fn load_chunks_parallel(region_dir: &Path, coords: &[ChunkKey]) -> Vec<(ChunkKey
         }
         let mut out = Vec::with_capacity(coords.len());
         for h in handles {
-            match h.join() {
-                Ok(v) => out.extend(v),
-                Err(_) => {}
+            if let Ok(v) = h.join() {
+                out.extend(v);
             }
         }
         out
@@ -582,7 +736,7 @@ mod tests {
         let w = 5;
         let h = vec![64i32; w * w];
         let idx = 2 * w + 2;
-        assert!((hillshade_at(&h, w, idx) - 1.0).abs() < 1e-6);
+        assert!((hillshade_at(&h, w, idx, true) - 1.0).abs() < 1e-6);
     }
 
     /// Light comes from the north-west, so slopes whose surface faces NW
@@ -600,8 +754,8 @@ mod tests {
             }
         }
         let idx = 2 * w + 2;
-        let lit = hillshade_at(&rises_to_se, w, idx);
-        let dark = hillshade_at(&rises_to_nw, w, idx);
+        let lit = hillshade_at(&rises_to_se, w, idx, true);
+        let dark = hillshade_at(&rises_to_nw, w, idx, true);
         assert!(lit > 1.0, "NW-facing slope should be lit, got {}", lit);
         assert!(dark < 1.0, "SE-facing slope should be dark, got {}", dark);
     }
@@ -619,8 +773,8 @@ mod tests {
             }
         }
         let idx = 2 * w + 2;
-        let g = (hillshade_at(&gentle, w, idx) - 1.0).abs();
-        let c = (hillshade_at(&cliff, w, idx) - 1.0).abs();
+        let g = (hillshade_at(&gentle, w, idx, true) - 1.0).abs();
+        let c = (hillshade_at(&cliff, w, idx, true) - 1.0).abs();
         assert!(c > g * 2.0, "cliff {} should dwarf gentle {}", c, g);
     }
 
@@ -631,7 +785,7 @@ mod tests {
         let mut h = vec![EMPTY; w * w];
         let idx = 2 * w + 2;
         h[idx] = 70;
-        let s = hillshade_at(&h, w, idx);
+        let s = hillshade_at(&h, w, idx, true);
         assert!(s.is_finite() && s > 0.0);
     }
 }

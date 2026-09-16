@@ -1,3 +1,5 @@
+mod biome;
+mod biome_tints;
 mod legacy_ids;
 mod nbt;
 mod palette;
@@ -44,8 +46,9 @@ fn open_world(path: String, state: State<AppState>) -> OpenResult {
             let info = w.info();
             let pal = palette::Palette::load(&w.instance_root, &w.level_dat)
                 .unwrap_or_else(|_| palette::Palette::empty());
-            *state.cache.lock().unwrap() = Some(TileCache::new(pal, 4096));
+            let cache = TileCache::new(pal, 4096);
             *state.world.lock().unwrap() = Some(w);
+            *state.cache.lock().unwrap() = Some(cache);
             OpenResult {
                 ok: true,
                 info: Some(info),
@@ -151,6 +154,7 @@ fn render_tile_png(
     x: i32,
     row: i32,
     ymax_u: i64,
+    opts: render::RenderOpts,
 ) -> Result<(Vec<u8>, bool), String> {
     let world_guard = state.world.lock().unwrap();
     let world = world_guard.as_ref().ok_or("未加载世界")?;
@@ -161,7 +165,7 @@ fn render_tile_png(
     let mut cache_guard = state.cache.lock().unwrap();
     let cache = cache_guard.as_mut().ok_or("缓存未初始化")?;
 
-    let (png, has_data) = render::render_tile(cache, &region_dir, z, x, row, ymax)?;
+    let (png, has_data) = render::render_tile(cache, &region_dir, z, x, row, ymax, opts)?;
     Ok((png, has_data))
 }
 
@@ -234,33 +238,37 @@ fn tile_from_uri(state: &AppState, uri: &tauri::http::Uri) -> Result<(Vec<u8>, b
     let z: i32 = parts[2].parse().map_err(|_| "bad z".to_string())?;
     let x: i32 = parts[3].parse().map_err(|_| "bad x".to_string())?;
     let row: i32 = parts[4].parse().map_err(|_| "bad row".to_string())?;
-    let ymax = uri
-        .query()
-        .and_then(|q| {
-            q.split('&')
-                .filter_map(|kv| kv.split_once('='))
-                .find(|(k, _)| *k == "ymax")
-                .and_then(|(_, v)| v.parse::<i64>().ok())
-        })
+    let query = uri.query().unwrap_or("");
+    let lookup = |k: &str| -> Option<String> {
+        query
+            .split('&')
+            .filter_map(|kv| kv.split_once('='))
+            .find(|(key, _)| *key == k)
+            .map(|(_, v)| v.to_string())
+    };
+    let ymax = lookup("ymax")
+        .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(world::YMAX_FULL);
-    render_tile_png(state, dim, z, x, row, ymax)
+    let opts = render::RenderOpts::from_query(lookup);
+    render_tile_png(state, dim, z, x, row, ymax, opts)
 }
 
 /// Exposed for tests
 pub mod testing {
+    pub use crate::biome::{apply_tint, tint_color, BiomeDef, TintKind};
     pub use crate::palette::Palette;
-    pub use crate::region::{BlockStates, Section};
-    pub use crate::render::{BlockRef, ChunkData};
+    pub use crate::region::{BlockStates, LegacyBiomes, Section};
+    pub use crate::render::{BlockRef, ChunkData, RenderOpts, ScanOpts};
     pub use crate::world::{resolve_ymax, DimensionInfo, World, YMAX_FULL};
 
-    /// Whether a block name is foliage that needs a biome tint.
-    pub fn is_foliage(name: &str) -> bool {
-        crate::render::is_foliage(name)
+    /// Which biome tint a block name takes.
+    pub fn tint_kind(name: &str) -> crate::biome::TintKind {
+        crate::render::tint_kind(name)
     }
 
-    /// Apply the foliage tint to a grey texture colour.
-    pub fn apply_foliage_tint(c: [u8; 3]) -> [u8; 3] {
-        crate::render::apply_foliage_tint(c)
+    /// Resolve a palette colour for a biome.
+    pub fn resolve_color(c: [u8; 3], name: &str, biome: crate::biome::BiomeDef) -> [u8; 3] {
+        crate::render::resolve_color(c, name, biome)
     }
 
     use std::path::{Path, PathBuf};
@@ -315,9 +323,15 @@ pub mod testing {
         tile_row: i32,
         ymax: i32,
     ) -> Result<Vec<u8>, String> {
-        let mut cache = crate::render::TileCache::new(palette.clone(), 512);
-        crate::render::render_tile(&mut cache, region_dir, zoom, tile_x, tile_row, ymax)
-            .map(|(png, _has_data)| png)
+        render_tile_with_opts(
+            palette,
+            region_dir,
+            zoom,
+            tile_x,
+            tile_row,
+            ymax,
+            RenderOpts::default(),
+        )
     }
 
     /// Like `render_tile` but also reports whether the tile covers any
@@ -330,8 +344,43 @@ pub mod testing {
         tile_row: i32,
         ymax: i32,
     ) -> Result<(Vec<u8>, bool), String> {
+        render_tile_full(
+            palette,
+            region_dir,
+            zoom,
+            tile_x,
+            tile_row,
+            ymax,
+            RenderOpts::default(),
+        )
+    }
+
+    /// Render with explicit render options.
+    pub fn render_tile_with_opts(
+        palette: &Palette,
+        region_dir: &Path,
+        zoom: i32,
+        tile_x: i32,
+        tile_row: i32,
+        ymax: i32,
+        opts: RenderOpts,
+    ) -> Result<Vec<u8>, String> {
+        render_tile_full(palette, region_dir, zoom, tile_x, tile_row, ymax, opts)
+            .map(|(png, _has_data)| png)
+    }
+
+    /// Render with explicit options, reporting the data flag too.
+    pub fn render_tile_full(
+        palette: &Palette,
+        region_dir: &Path,
+        zoom: i32,
+        tile_x: i32,
+        tile_row: i32,
+        ymax: i32,
+        opts: RenderOpts,
+    ) -> Result<(Vec<u8>, bool), String> {
         let mut cache = crate::render::TileCache::new(palette.clone(), 512);
-        crate::render::render_tile(&mut cache, region_dir, zoom, tile_x, tile_row, ymax)
+        crate::render::render_tile(&mut cache, region_dir, zoom, tile_x, tile_row, ymax, opts)
     }
 
     #[allow(dead_code)]

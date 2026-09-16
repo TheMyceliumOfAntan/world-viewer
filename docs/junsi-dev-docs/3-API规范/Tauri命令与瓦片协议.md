@@ -161,7 +161,7 @@ invoke<BlockInfo>("probe_block", { dim: 0, x: -415, z: -286, ymaxU: 4294967295 }
 ### 3.1 URL 格式
 
 ```
-http://tile.localhost/{worldKey}/{dim}/{z}/{x}/{y}.png?ymax=N
+http://tile.localhost/{worldKey}/{dim}/{z}/{x}/{y}.png?ymax=N&water=1&shade=1&alt=1
 ```
 
 （Tauri 2 在 Windows 上将 `tile://` 映射为 `http://tile.localhost/`）
@@ -174,6 +174,11 @@ http://tile.localhost/{worldKey}/{dim}/{z}/{x}/{y}.png?ymax=N
 | `x` | i32 | 瓦片列号，可为负 |
 | `y` | i32 | 瓦片行号，可为负 |
 | `ymax` | i64 | 高度切层上限，**可为负**（1.18+ 世界最低 Y=-64）；`4294967295` 表示全高 |
+| `water` | 0\|1 | 水面透视（显示水底）。缺省为开 |
+| `shade` | 0\|1 | 地形浮雕着色。缺省为开 |
+| `alt` | 0\|1 | 高度明暗项（`shade` 的子项）。缺省为开 |
+
+三个渲染开关均**缺省为开**，因此不带它们的旧 URL 行为不变。前端侧栏「渲染」区的勾选框会改变 URL，`CachedTileLayer` 据此清缓存重绘（见 `2-架构设计/渲染管线.md` §9.3）。
 
 **路径段数必须为 5**，否则返回 404 与错误文本。
 

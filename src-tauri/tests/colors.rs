@@ -144,15 +144,17 @@ fn gtnh_grass_and_foliage_are_green() {
     eprintln!("best GTNH tile: {:.1}% green at {:?}", best_green, best_tile);
 }
 
-/// `is_foliage` must match the vanilla tint categories exactly: blocks that
+/// `tint_kind` must match the vanilla tint categories exactly: blocks that
 /// the game tints with the biome colour, and nothing else. Tinting a flower
 /// or a crop turns it green, which is wrong.
 #[test]
-fn foliage_classification_matches_vanilla_tint_categories() {
+fn tint_categories_match_vanilla() {
+    use testing::TintKind;
+
     // Vanilla `grass` tint: grass_block top, short/tall grass, ferns, reeds.
     // Vanilla `foliage` tint: leaves and vines.
     // Plus modded ground cover observed on the real GTNH surface.
-    let must_tint = [
+    let must_tint_grass = [
         "minecraft:grass",
         "minecraft:grass_block",
         "minecraft:tallgrass",
@@ -162,21 +164,22 @@ fn foliage_classification_matches_vanilla_tint_categories() {
         "minecraft:large_fern",
         "minecraft:reeds",
         "minecraft:double_plant",
+        "BiomesOPlenty:foliage",
+    ];
+    let must_tint_foliage = [
         "minecraft:leaves",
         "minecraft:leaves2",
         "minecraft:vine",
         "minecraft:oak_leaves",
         "minecraft:spruce_leaves",
         "minecraft:acacia_leaves",
-        "BiomesOPlenty:foliage",
         "Thaumcraft:blockMagicalLeaves",
         "IC2:blockRubLeaves",
     ];
-    // These have their own colours and must NOT be tinted green.
+    // These have their own colours and must NOT be tinted.
     let must_not_tint = [
         "minecraft:stone",
         "minecraft:dirt",
-        "minecraft:water",
         "minecraft:sand",
         "minecraft:gravel",
         "minecraft:log",
@@ -192,28 +195,43 @@ fn foliage_classification_matches_vanilla_tint_categories() {
         "BiomesOPlenty:flowers",
         "BiomesOPlenty:lilyBop",
     ];
-    for name in must_tint {
-        assert!(
-            testing::is_foliage(name),
-            "{} must be tinted (vanilla tint category)",
+
+    for name in must_tint_grass {
+        assert_eq!(
+            testing::tint_kind(name),
+            TintKind::Grass,
+            "{} must take the grass tint",
+            name
+        );
+    }
+    for name in must_tint_foliage {
+        assert_eq!(
+            testing::tint_kind(name),
+            TintKind::Foliage,
+            "{} must take the foliage tint",
             name
         );
     }
     for name in must_not_tint {
-        assert!(
-            !testing::is_foliage(name),
+        assert_eq!(
+            testing::tint_kind(name),
+            TintKind::None,
             "{} must NOT be tinted — it has its own colour",
             name
         );
     }
+    // Water takes the water tint, which is what makes swamp water green.
+    assert_eq!(testing::tint_kind("minecraft:water"), TintKind::Water);
 }
 
-/// Tinting grey texture colours must yield a recognisable green.
+/// Tinting a grey texture colour must yield a recognisable green, and the
+/// biome must actually change the result.
 #[test]
-fn foliage_tint_produces_green() {
+fn foliage_tint_produces_green_and_varies_by_biome() {
+    use testing::BiomeDef;
     // The real palette values for grass / tallgrass in the GTNH save.
     for grey in [[0x93u8, 0x93, 0x93], [0x87, 0x87, 0x87], [0x74, 0x74, 0x74]] {
-        let out = testing::apply_foliage_tint(grey);
+        let out = testing::resolve_color(grey, "minecraft:grass", BiomeDef::legacy(1));
         let (r, g, b) = (out[0] as i32, out[1] as i32, out[2] as i32);
         assert!(
             g > r && g > b,
@@ -223,4 +241,13 @@ fn foliage_tint_produces_green() {
         );
         assert!(g > 80, "tinted {:?} too dark: {:?}", grey, out);
     }
+
+    // Different biomes must produce different grass: a swamp is not a plains.
+    let plains = testing::resolve_color([0x93, 0x93, 0x93], "minecraft:grass", BiomeDef::legacy(1));
+    let swamp = testing::resolve_color([0x93, 0x93, 0x93], "minecraft:grass", BiomeDef::legacy(6));
+    assert_ne!(
+        plains, swamp,
+        "biome tint must change the rendered colour (plains {:?} vs swamp {:?})",
+        plains, swamp
+    );
 }

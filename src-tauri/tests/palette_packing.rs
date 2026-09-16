@@ -58,6 +58,7 @@ fn section_with(indices: &[u16], entries: usize, bits: u32, contiguous: bool) ->
         data: None,
         add: None,
         block_states: Some(BlockStates::from_parts(palette(entries), Some(data))),
+        biomes: None,
     }
 }
 
@@ -138,6 +139,7 @@ fn single_entry_palette_needs_no_data() {
         data: None,
         add: None,
         block_states: Some(BlockStates::from_parts(palette(1), None)),
+        biomes: None,
     };
     assert_eq!(section.block_states.as_ref().unwrap().bits, 0);
     assert_eq!(section.palette_index(3, 4, 5), Some(0));

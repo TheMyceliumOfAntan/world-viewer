@@ -48,9 +48,23 @@ type BlockInfo = { y: number | null; name: string | null; id: string | null };
 
 const DEFAULT_SAVE = "C:\\.minecraft\\versions\\GTNH 2.8.4\\saves\\新的世界 - 副本";
 
-function tileUrl(dim: number, ymax: number, maxY: number, worldKey: string) {
+/** Render toggles, mirrored in the tile URL so each tile renders per setting. */
+type RenderFlags = { water: boolean; shading: boolean; altitude: boolean };
+
+const DEFAULT_FLAGS: RenderFlags = { water: true, shading: true, altitude: true };
+
+function tileUrl(
+  dim: number,
+  ymax: number,
+  maxY: number,
+  worldKey: string,
+  flags: RenderFlags
+) {
   const yPart = ymax >= maxY ? "4294967295" : String(ymax);
-  return `http://tile.localhost/${worldKey}/${dim}/{z}/{x}/{y}.png?ymax=${yPart}`;
+  const f = `water=${flags.water ? 1 : 0}&shade=${flags.shading ? 1 : 0}&alt=${
+    flags.altitude ? 1 : 0
+  }`;
+  return `http://tile.localhost/${worldKey}/${dim}/{z}/{x}/{y}.png?ymax=${yPart}&${f}`;
 }
 
 /** Short, filesystem-safe key identifying a save, so tile URLs differ per world. */
@@ -108,6 +122,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [mouse, setMouse] = useState<{ x: number; z: number } | null>(null);
   const [block, setBlock] = useState<BlockInfo | null>(null);
+  const [flags, setFlags] = useState<RenderFlags>(DEFAULT_FLAGS);
   // Vertical extent of the current dimension. Modern saves reach -64..319,
   // legacy ones 0..255, and modded datapacks can move both ends, so the
   // slider range and the "full height" sentinel follow the world's own limits
@@ -183,12 +198,18 @@ export default function App() {
     return map;
   };
 
-  const buildTileLayer = (map: L.Map, dimension: number, ymaxVal: number, maxY: number) => {
-    const template = tileUrl(dimension, ymaxVal, maxY, worldKeyRef.current);
+  const buildTileLayer = (
+    map: L.Map,
+    dimension: number,
+    ymaxVal: number,
+    maxY: number,
+    f: RenderFlags
+  ) => {
+    const template = tileUrl(dimension, ymaxVal, maxY, worldKeyRef.current, f);
     if (layerRef.current) {
-      // Reuse the layer (and its cache) unless the world or the height
-      // filter changed. The world key is part of the URL, so switching saves
-      // is detected here and drops the previous world's tiles.
+      // Reuse the layer (and its cache) unless the world, the height filter or
+      // a render toggle changed. All of them are part of the URL, so switching
+      // worlds is detected here and drops the previous world's tiles.
       const changed = layerRef.current.getUrlTemplate() !== template;
       if (changed) {
         layerRef.current.clearCache();
@@ -282,7 +303,7 @@ export default function App() {
       setDim(firstDim);
       const firstRange = rangeOf(res.info.dimensions, firstDim);
       setYmax(firstRange.max);
-      buildTileLayer(map, firstDim, firstRange.max, firstRange.max);
+      buildTileLayer(map, firstDim, firstRange.max, firstRange.max, flags);
       drawMarkers(map, res.info, firstDim);
       // center on player if present, else on spawn-ish origin
       const p = res.info.player;
@@ -309,7 +330,7 @@ export default function App() {
     const nextRange = rangeOf(info?.dimensions ?? [], id);
     const nextYmax = Math.min(ymax, nextRange.max);
     setYmax(nextYmax);
-    buildTileLayer(map, id, nextYmax, nextRange.max);
+    buildTileLayer(map, id, nextYmax, nextRange.max, flags);
     if (info) drawMarkers(map, info, id);
     // Fly to the first marker in this dimension, else to origin
     const wps = info?.waypoints.filter((w) => w.dimension === id) ?? [];
@@ -327,7 +348,15 @@ export default function App() {
     setYmax(v);
     const map = mapRef.current;
     if (!map) return;
-    buildTileLayer(map, dim, v, range.max);
+    buildTileLayer(map, dim, v, range.max, flags);
+  };
+
+  const toggleFlag = (key: keyof RenderFlags) => {
+    const next = { ...flags, [key]: !flags[key] };
+    setFlags(next);
+    const map = mapRef.current;
+    if (!map) return;
+    buildTileLayer(map, dim, ymax, range.max, next);
   };
 
   const pickFolder = async () => {
@@ -415,6 +444,43 @@ export default function App() {
             </div>
           </div>
           <p className="hint">向下拖动可查看地下结构（洞穴/矿道）</p>
+
+          <h3>渲染</h3>
+          <ul className="toggles">
+            <li>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={flags.water}
+                  disabled={!info}
+                  onChange={() => toggleFlag("water")}
+                />
+                透视水面（显示水底）
+              </label>
+            </li>
+            <li>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={flags.shading}
+                  disabled={!info}
+                  onChange={() => toggleFlag("shading")}
+                />
+                地形阴影
+              </label>
+            </li>
+            <li>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={flags.altitude}
+                  disabled={!info || !flags.shading}
+                  onChange={() => toggleFlag("altitude")}
+                />
+                高度明暗
+              </label>
+            </li>
+          </ul>
 
           <h3>图例</h3>
           <ul className="legend">
