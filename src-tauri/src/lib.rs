@@ -249,6 +249,7 @@ fn tile_from_uri(state: &AppState, uri: &tauri::http::Uri) -> Result<(Vec<u8>, b
 /// Exposed for tests
 pub mod testing {
     pub use crate::palette::Palette;
+    pub use crate::region::{BlockStates, Section};
     pub use crate::render::{BlockRef, ChunkData};
     pub use crate::world::{resolve_ymax, DimensionInfo, World, YMAX_FULL};
 

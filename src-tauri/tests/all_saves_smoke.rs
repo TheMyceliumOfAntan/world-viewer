@@ -15,6 +15,10 @@ fn saves() -> Vec<(&'static str, PathBuf)> {
             PathBuf::from(r"C:\.minecraft\versions\1.12.2-Forge-14.23.5.2864\saves\新的世界"),
         ),
         (
+            "1.16.5 (sibling Palette/BlockStates)",
+            PathBuf::from(r"C:\.minecraft\versions\1.16.5\saves\新的世界"),
+        ),
+        (
             "Aegis 1.20+",
             PathBuf::from(r"C:\.minecraft\versions\Aegis of the Frozen Sky\saves\新的世界"),
         ),
@@ -25,6 +29,21 @@ fn saves() -> Vec<(&'static str, PathBuf)> {
         (
             "26.2 (dimensions/<ns>/<name>)",
             PathBuf::from(r"C:\.minecraft\versions\26.2\saves\新的世界"),
+        ),
+        // Saves from the C:\Minecraft instance. 1.6.4/1.8.9 exercise the
+        // pre-1.13 block names (LEGACY_ALIASES); 1.14.4 exercises the
+        // 1.13-1.17 sibling Palette/BlockStates layout.
+        (
+            "1.6.4 (pre-1.13 names)",
+            PathBuf::from(r"C:\Minecraft\.minecraft\versions\1.6.4\saves\New World"),
+        ),
+        (
+            "1.8.9 (pre-1.13 names)",
+            PathBuf::from(r"C:\Minecraft\.minecraft\versions\1.8.9\saves\新的世界"),
+        ),
+        (
+            "1.14.4 (sibling Palette/BlockStates)",
+            PathBuf::from(r"C:\Minecraft\.minecraft\versions\1.14.4\saves\新的世界"),
         ),
     ]
 }
