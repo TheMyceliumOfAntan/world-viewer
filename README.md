@@ -248,7 +248,15 @@ node scripts/measure-center-latency.mjs 9223 <label>
 
 ## 许可
 
-未指定。
+GNU General Public License v3.0（仅此版本，SPDX: `GPL-3.0-only`）。全文见 [`LICENSE`](LICENSE)。
+
+```
+Copyright (C) 2026 JunSi_233 <tmoaminecraft@gmail.com>
+```
+
+这意味着：你可以自由使用、修改、分发本软件，但分发（含修改版）时必须提供完整源码并以同样的 GPLv3 授权，且不提供任何担保。本程序按"现状"提供，无任何明示或暗示的保证。
+
+第三方依赖均使用与 GPLv3 兼容的宽松许可（MIT / Apache-2.0 / BSD-2-Clause），详见各自仓库。
 
 ## 范围外
 

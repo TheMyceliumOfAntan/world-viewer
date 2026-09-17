@@ -3,6 +3,7 @@ name = "world-viewer"
 version = "0.1.0"
 description = "Minecraft world viewer for modded 1.7.10 saves (GTNH)"
 edition = "2021"
+license = "GPL-3.0-only"
 
 [lib]
 name = "world_viewer_lib"
