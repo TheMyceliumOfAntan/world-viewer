@@ -4,6 +4,21 @@ import L from "leaflet";
 type TileImage = { bitmap: ImageBitmap; isEmpty: boolean };
 
 /**
+ * A tile request waiting for a free concurrency slot.
+ *
+ * The tile coordinates are kept alongside the job so `pump` can prefer the
+ * tile nearest the viewport centre. Leaflet asks for tiles in row-major order,
+ * so without this the first column of a fresh viewport is fetched before the
+ * middle — the part the user is actually looking at.
+ */
+type QueuedTile = {
+  z: number;
+  x: number;
+  y: number;
+  job: () => void;
+};
+
+/**
  * A tile layer that never leaves holes while loading.
  *
  * Plain L.tileLayer requests every visible tile at once and shows blank space
@@ -23,7 +38,7 @@ export class CachedTileLayer extends L.GridLayer {
   private empty = new Set<string>();
   /** Pending callbacks per tile key; all fire when the image resolves. */
   private waiting = new Map<string, Array<(img: TileImage | null) => void>>();
-  private queue: Array<() => void> = [];
+  private queue: QueuedTile[] = [];
   private active = 0;
 
   /** Keyed by `dim|ymax` — changing either invalidates every tile. */
@@ -166,16 +181,60 @@ export class CachedTileLayer extends L.GridLayer {
     });
   }
 
+  /**
+   * Viewport centre in tile coordinates, or null when there is no map.
+   *
+   * Used to order the queue by distance so the tiles under the viewport centre
+   * load first. Leaflet's own request order is row-major, which fills the top
+   * rows of a new viewport before anything the user is looking at.
+   */
+  private centerTile(): { z: number; x: number; y: number } | null {
+    const map = (this as unknown as { _map?: L.Map })._map;
+    const zoom = (this as unknown as { _tileZoom?: number })._tileZoom;
+    if (!map || zoom === undefined || zoom === null) return null;
+    const size = this.getTileSize();
+    const center = map.project(map.getCenter(), zoom).divideBy(size.x);
+    return { z: zoom, x: center.x, y: center.y };
+  }
+
+  /**
+   * Take the queued tile nearest the viewport centre.
+   *
+   * A linear scan is deliberate: the queue holds at most one viewport's worth
+   * of tiles (tens, occasionally a few hundred when panning fast), so an O(n)
+   * pick per slot is cheaper than maintaining a sorted structure, and the
+   * distance to the centre changes as the map moves.
+   *
+   * Only tiles at the current `_tileZoom` are ordered. During a zoom the queue
+   * briefly mixes zooms, and distances computed across two coordinate systems
+   * would be meaningless; entries at another zoom keep their arrival order.
+   */
   private pump() {
     while (this.active < this.maxConcurrent && this.queue.length > 0) {
-      const job = this.queue.shift()!;
+      let pick = 0;
+      const center = this.centerTile();
+      if (center && this.queue.length > 1) {
+        let best = Infinity;
+        for (let i = 0; i < this.queue.length; i++) {
+          const t = this.queue[i];
+          if (t.z !== center.z) continue;
+          const dx = t.x + 0.5 - center.x;
+          const dy = t.y + 0.5 - center.y;
+          const d = dx * dx + dy * dy;
+          if (d < best) {
+            best = d;
+            pick = i;
+          }
+        }
+      }
+      const [entry] = this.queue.splice(pick, 1);
       this.active++;
-      job();
+      entry.job();
     }
   }
 
-  private enqueue(job: () => void) {
-    this.queue.push(job);
+  private enqueue(z: number, x: number, y: number, job: () => void) {
+    this.queue.push({ z, x, y, job });
     this.pump();
   }
 
@@ -191,7 +250,12 @@ export class CachedTileLayer extends L.GridLayer {
     for (const cb of list) cb(img);
   }
 
-  private load(key: string, url: string, onReady: (img: TileImage | null) => void) {
+  private load(
+    key: string,
+    coords: L.Coords,
+    url: string,
+    onReady: (img: TileImage | null) => void
+  ) {
     const cached = this.recall(key);
     if (cached) {
       onReady({ bitmap: cached, isEmpty: this.empty.has(key) });
@@ -211,7 +275,7 @@ export class CachedTileLayer extends L.GridLayer {
     }
 
     this.waiting.set(key, [onReady]);
-    this.enqueue(() => {
+    this.enqueue(coords.z, coords.x, coords.y, () => {
       // Use fetch so the X-Tile-Empty header (no generated chunks here) is
       // readable; an <img> would hide it.
       fetch(url, { mode: "cors" })
@@ -280,7 +344,7 @@ export class CachedTileLayer extends L.GridLayer {
     // 'leaflet-tile-loaded', leaving the tile visibility:hidden forever (the
     // map goes black after zooming out onto cached tiles). Defer one task so
     // the lookup succeeds.
-    this.load(key, this.urlFor(coords), (img) => {
+    this.load(key, coords, this.urlFor(coords), (img) => {
       setTimeout(() => {
         if (!img) {
           // Leave whatever the parent fallback drew (possibly nothing) and let
