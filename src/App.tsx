@@ -46,8 +46,6 @@ type OpenResult = { ok: boolean; info: WorldInfo | null; error: string | null };
 /** Top-most non-air block of the hovered column (see `probe_block`). */
 type BlockInfo = { y: number | null; name: string | null; id: string | null };
 
-const DEFAULT_SAVE = "C:\\.minecraft\\versions\\GTNH 2.8.4\\saves\\新的世界 - 副本";
-
 /** Render toggles, mirrored in the tile URL so each tile renders per setting. */
 type RenderFlags = { water: boolean; shading: boolean; altitude: boolean };
 
@@ -398,9 +396,6 @@ export default function App() {
         <div className="actions">
           <button onClick={pickFolder} disabled={loading}>
             选择存档…
-          </button>
-          <button onClick={() => loadWorld(DEFAULT_SAVE)} disabled={loading}>
-            加载 GTNH 测试存档
           </button>
         </div>
       </header>

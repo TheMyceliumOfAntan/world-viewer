@@ -1,7 +1,7 @@
 [package]
 name = "world-viewer"
 version = "0.1.0"
-description = "Minecraft world viewer for modded 1.7.10 saves (GTNH)"
+description = "Minecraft world viewer: renders any Java Edition save as an interactive map"
 edition = "2021"
 license = "GPL-3.0-only"
 
