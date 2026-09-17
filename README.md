@@ -246,6 +246,21 @@ node scripts/measure-center-latency.mjs 9223 <label>
 | 需求边界 | `9-系统要求/功能与非功能需求.md` |
 | 架构决策记录 | `1-决策记录/ADR-00*.md` |
 
+## 鸣谢
+
+本项目的渲染算法与配色数据参考自以下开源项目：
+
+- **[MCA Selector](https://github.com/Querz/mcaselector)**（MIT）— 一个 Minecraft 区块选择与地图编辑工具。
+  - 地形渲染流程（逐列地表扫描、水面按深度混合）参照其 `ChunkRenderer_21w43a` 与 `TileImage.shade`
+  - `src-tauri/src/biome_tints.rs` 的生物群系 tint 表由其逐版本配色数据生成
+  - 水面混合的深度衰减公式（浅水透底、40 格深处回归纯水色）与其 `shade` 一致
+  - 染色方案上有意**偏离**其做法：其对水存灰色基色，而本项目用 JourneyMap 已着色调色板，故已着色方块走比例缩放而非乘 tint（见 `ADR-004`）
+
+- **[Amulet](https://github.com/Amulet-Team/Amulet-Core)**（Amulet Team）— Minecraft 存档读写库。
+  - `src-tauri/src/region.rs` 的 LZ4 区块解压参照其 [PR #283](https://github.com/Amulet-Team/Amulet-Core/pull/283)（对应 [Amulet issue #1027](https://github.com/Amulet-Team/Amulet-Map-Editor/issues/1027)），即 lz4-java `LZ4Block` 流的解析方式
+
+以上均为**独立实现，未复制其代码**。MCA Selector 为地形可视化与区块格式解析提供了重要参考；Amulet 的 LZ4 修复是社区验证过的正确实现。
+
 ## 许可
 
 GNU General Public License v3.0（仅此版本，SPDX: `GPL-3.0-only`）。全文见 [`LICENSE`](LICENSE)。
