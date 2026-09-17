@@ -52,13 +52,37 @@ export class CachedTileLayer extends L.GridLayer {
    * whole LRU — no separate bookkeeping, since the key is the URL and the value
    * is only reachable through it.
    */
+  /**
+   * Release an evicted bitmap's GPU memory.
+   *
+   * `ImageBitmap.close()` is immediate, and a bitmap may still be referenced
+   * by a `createTile` callback sitting in the `setTimeout` queue (both the
+   * parent-fallback draw and the sharp-tile draw run there). Closing in the
+   * same turn would make that `drawImage` throw `InvalidStateError`, so the
+   * close is deferred one macrotask, after every already-queued draw has run.
+   *
+   * The deferral opens a race: the same bitmap can be re-remembered (cache
+   * hit) before the timeout fires. Re-check membership at close time so a
+   * bitmap that is live again is not closed out from under the cache.
+   */
+  private closeSoon(bitmap: ImageBitmap) {
+    setTimeout(() => {
+      for (const live of this.cache.values()) {
+        if (live === bitmap) return;
+      }
+      bitmap.close();
+    }, 0);
+  }
+
   private remember(key: string, bitmap: ImageBitmap) {
     this.cache.delete(key);
     this.cache.set(key, bitmap);
     while (this.cache.size > this.maxCached) {
       const oldest = this.cache.keys().next().value;
       if (oldest === undefined) break;
+      const evicted = this.cache.get(oldest);
       this.cache.delete(oldest);
+      if (evicted) this.closeSoon(evicted);
       // The empty-set is a sibling of the cache and must not outgrow it.
       this.empty.delete(oldest);
     }
@@ -113,6 +137,9 @@ export class CachedTileLayer extends L.GridLayer {
 
   /** Drop cached tiles for the previous world/height without touching the map. */
   clearCache() {
+    for (const bitmap of this.cache.values()) {
+      this.closeSoon(bitmap);
+    }
     this.cache.clear();
     this.waiting.clear();
     this.failures.clear();
